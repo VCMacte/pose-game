@@ -5,8 +5,7 @@
 
 Родитель: [`../CLAUDE.md`](../CLAUDE.md).
 Код: `src/core/types.ts`, `src/core/config.ts`, `src/core/axes.ts`,
-`src/core/poses.ts`; запланированы, ещё не написаны — `src/core/figure.ts`,
-`src/core/match.ts`.
+`src/core/poses.ts`, `src/core/figure.ts`, `src/core/match.ts`.
 Замысел и обоснование чисел: [`concept-and-plan.md`](concept-and-plan.md).
 
 ## Правило: позы двумерные
