@@ -82,8 +82,13 @@ type _AxesHaveNoExtra = AssertNever<Exclude<Axis, keyof AxisRequirements>>
  * ребёнком. Единицы — свои у каждой оси (градусы либо доли торса `S`), и
  * значение считается даже тогда, когда состояние — «не знаю». `NaN` значит, что
  * мерить было нечем: оси на этом кадре нет (ближняя и дальняя сторона во
- * фронтальном кадре) либо ни одной годной точки не нашлось (ноги, у которых не
- * видно ни стоп, ни колен).
+ * фронтальном кадре) либо ни одной годной точки не нашлось — ноги, у которых не
+ * видно ни стоп, ни колен, и ЛЮБАЯ ось, чья точка не прошла порог
+ * `visibility`. В последнем случае координаты у точки есть, но они достроены
+ * моделью, а не увидены: число по ним — догадка, и в журнал оно уходить не
+ * вправе. Исключение одно и оно не об этом: кисти, сведённые при невидимой
+ * голове, дают «не знаю» (без линии головы `over-head` не отличить), но само
+ * расстояние между кистями измерено по видимым точкам и остаётся числом.
  */
 export type AxisReading<T> = {
   state: AxisValue<T>
@@ -136,6 +141,17 @@ const reading = <T>(state: AxisValue<T>, measured: number): AxisReading<T> => ({
 
 /** Оси на этом кадре нет — так читаются ближняя и дальняя сторона во фронте. */
 const noReading = <T>(): AxisReading<T> => reading<T>('unknown', Number.NaN)
+
+/**
+ * Точка, по которой ось мерит, ниже порога уверенности: мерить было нечем, и
+ * `measured` обязан быть `NaN`.
+ *
+ * Координаты у непройденной точки есть — модель достраивает их по телу, — но
+ * число, посчитанное по ним, уехало бы в `perAxis` журнала как настоящее
+ * измерение. Журнал — весь диагностический аппарат игры, и уверенное неверное
+ * число в нём хуже отсутствующего.
+ */
+const unseen = <T>(): AxisReading<T> => reading<T>('unknown', Number.NaN)
 
 /** Полоса состояния: опорное значение и допуск вокруг него. */
 type Band<T> = { state: T; ref: number; tol: number }
@@ -242,7 +258,7 @@ function shoulderAxis(c: Ctx, side: Side): AxisReading<ShoulderState> {
   const i = IDX[side]
   const sign = c.sign(side)
   const angle = sign === null ? Number.NaN : limbAngle(c.p(i.shoulder), c.p(i.elbow), sign)
-  if (sign === null || !c.seen(i.shoulder, i.elbow)) return reading<ShoulderState>('unknown', angle)
+  if (sign === null || !c.seen(i.shoulder, i.elbow)) return unseen<ShoulderState>()
 
   const state = pick(angle, shoulderBands(c.profile, c.strict), circular)
   if (state !== 'unknown') return reading(state, angle)
@@ -263,7 +279,7 @@ function shoulderAxis(c: Ctx, side: Side): AxisReading<ShoulderState> {
 function elbowAxis(c: Ctx, side: Side): AxisReading<ElbowState> {
   const i = IDX[side]
   const angle = jointAngle(c.p(i.shoulder), c.p(i.elbow), c.p(i.wrist))
-  if (!c.seen(i.shoulder, i.elbow, i.wrist)) return reading<ElbowState>('unknown', angle)
+  if (!c.seen(i.shoulder, i.elbow, i.wrist)) return unseen<ElbowState>()
 
   const straight = ANGLE.down - (ANGLE.down - CONFIG.elbow.straightMin) * c.strict
   const mid = (CONFIG.elbow.bentMin + CONFIG.elbow.bentMax) / 2
@@ -290,7 +306,7 @@ function forearmAxis(c: Ctx, side: Side): AxisReading<ForearmState> {
   const i = IDX[side]
   const sign = c.sign(side)
   const angle = sign === null ? Number.NaN : limbAngle(c.p(i.elbow), c.p(i.wrist), sign)
-  if (sign === null || !c.seen(i.elbow, i.wrist)) return reading<ForearmState>('unknown', angle)
+  if (sign === null || !c.seen(i.elbow, i.wrist)) return unseen<ForearmState>()
 
   const state = pick(angle, forearmBands(c.profile, c.strict), circular)
   if (state !== 'unknown') return reading(state, angle)
@@ -305,7 +321,7 @@ function handsAxis(c: Ctx): AxisReading<HandsState> {
   const lw = c.p(LM.leftWrist)
   const rw = c.p(LM.rightWrist)
   const gap = dist(lw, rw) / c.g.S
-  if (!c.seen(LM.leftWrist, LM.rightWrist)) return reading<HandsState>('unknown', gap)
+  if (!c.seen(LM.leftWrist, LM.rightWrist)) return unseen<HandsState>()
 
   if (gap < CONFIG.hands.overHead * c.strict) {
     // Линия головы нужна только здесь: при разведённых кистях она ни на что
@@ -365,15 +381,24 @@ function legsAxis(c: Ctx): AxisReading<LegsState> {
 
   if (c.seen(LM.leftKnee, LM.rightKnee)) {
     const k = CONFIG.legs.knee
+    // Строгость полосы по коленям НЕ масштабирует — как и `max` ниже. Это не
+    // допуск вокруг цели, а порог-доказательство: разнос колен заново выводит
+    // ненаблюдаемый разнос стоп, и масштабировать вывод родительской
+    // настройкой «насколько точно повторять позу» нечем. Зазоры здесь 0.05 /
+    // 0.04 / 0.02 S против 0.10 S по стопам, и мягкий ×1.3 съедал бы их
+    // целиком: стойка `wide` на 1.92 читалась бы уверенным `shoulder`, то есть
+    // промахом там, где норма отвечает «не знаю». Оба приседа требуют `wide` —
+    // промах был бы не по вине ребёнка.
+    const exact = 1
     return byBands(
       gap(LM.leftKnee, LM.rightKnee),
       'knee',
       [
         // Снизу полоса закрыта: ниже `togetherMin` колени приседом не
         // разведены, и стойку по ним не восстановить.
-        span('together' as const, k.togetherMin, k.togetherMax, c.strict),
-        span('shoulder' as const, k.shoulderMin, k.shoulderMax, c.strict),
-        span('wide' as const, k.wideMin, k.wideMax, c.strict),
+        span('together' as const, k.togetherMin, k.togetherMax, exact),
+        span('shoulder' as const, k.shoulderMin, k.shoulderMax, exact),
+        span('wide' as const, k.wideMin, k.wideMax, exact),
       ],
       k.max,
     )
@@ -405,9 +430,7 @@ function supportAxis(c: Ctx): AxisReading<SupportState> {
   const lk = c.p(LM.leftKnee)
   const rk = c.p(LM.rightKnee)
   const diff = Math.abs(lk.y - rk.y) / c.g.S
-  if (!c.seen(LM.leftKnee, LM.rightKnee) || !Number.isFinite(diff)) {
-    return reading<SupportState>('unknown', diff)
-  }
+  if (!c.seen(LM.leftKnee, LM.rightKnee) || !Number.isFinite(diff)) return unseen<SupportState>()
   if (diff < CONFIG.support.kneeHeightDiff) return reading<SupportState>('both', diff)
 
   const stand: Side = lk.y > rk.y ? 'left' : 'right'
@@ -458,7 +481,7 @@ const kneePoints = [
 /** Колени: угол бедро–колено–стопа. Полоса 140..150 — «не знаю». */
 function kneesAxis(c: Ctx): AxisReading<'straight' | 'bent'> {
   const angle = worstKneeAngle(c)
-  if (!c.seen(...kneePoints)) return reading<'straight' | 'bent'>('unknown', angle)
+  if (!c.seen(...kneePoints)) return unseen<'straight' | 'bent'>()
   if (angle > ANGLE.down - (ANGLE.down - CONFIG.knee.straightMin) * c.strict) {
     return reading<'straight' | 'bent'>('straight', angle)
   }
@@ -501,12 +524,14 @@ function footAtKneeAxis(c: Ctx, support: AxisValue<SupportState>): AxisReading<b
   const stand = support === 'left' || support === 'right' ? support : null
   const measured = stand === null ? Math.min(toKnee('left'), toKnee('right')) : toKnee(stand)
 
-  // Без разрешённой опоры нет и опорного колена: сказать нечего.
-  if (support === 'unknown') return reading<boolean>('unknown', measured)
+  // Без разрешённой опоры нет и опорного колена: мерить было нечем, и числа
+  // поэтому нет. Чаще всего опора «не знаю» именно из-за невидимых колен —
+  // расстояние до них было бы посчитано по достроенным моделью точкам.
+  if (support === 'unknown') return unseen<boolean>()
   if (stand === null) return reading<boolean>(false, measured)
 
   const raised: Side = stand === 'left' ? 'right' : 'left'
-  if (!c.seen(IDX[stand].knee, IDX[raised].ankle)) return reading<boolean>('unknown', measured)
+  if (!c.seen(IDX[stand].knee, IDX[raised].ankle)) return unseen<boolean>()
   return reading<boolean>(measured < CONFIG.footAtKnee.distance * c.strict, measured)
 }
 

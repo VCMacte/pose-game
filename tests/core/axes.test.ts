@@ -104,6 +104,8 @@ const SANK_G = geometry(frame({ crouch: 75 }), ASPECT)!
 const SELF_DROP = (SANK_G.hipMid.y - NEUTRAL_G.hipMid.y) / SANK_G.S
 /** Присед ровно с одним голосом: колено согнуто, плечи и бёдра на месте. */
 const ONE_VOTE: Desc = { crouch: 75, bodyDrop: -SELF_DROP }
+/** Присед ровно с двумя голосами: плечи и бёдра просели, колени прямые. */
+const TWO_VOTES: Desc = { bodyDrop: 0.4 }
 /** Подошедший к камере: торс вырос, плечи и бёдра в кадре опустились. */
 const CLOSER: Desc = { torso: 0.33, bodyDrop: 1.3 }
 const CAL_CLOSE = calibrate({ torso: 0.33 })
@@ -235,6 +237,25 @@ describe('ноги и опора', () => {
     expect(read(byKnees(0.8)).legs.state).toBe('unknown')
   })
 
+  test('полосы по коленям строгостью не масштабируются', () => {
+    // 1.92 — в зазоре между `shoulder` (…1.90) и `wide` (1.94…). Если полосы
+    // масштабировать, мягкий ×1.3 растягивает `shoulder` до 1.921 и выдаёт тут
+    // уверенный `shoulder` — то есть ПРОМАХ широкой стойке, тогда как норма
+    // честно отвечает «не знаю». Полосы по коленям — порог-доказательство, а
+    // не допуск вокруг цели: строгость их не трогает.
+    const gapZone: Desc = { legs: 0.8, crouch: 'yes', visibilityOf: FEET_GONE }
+    const r = read(gapZone, SOFT)
+    expect(r.legs.measured).toBeGreaterThan(CONFIG.legs.knee.shoulderMax)
+    expect(r.legs.measured).toBeLessThan(CONFIG.legs.knee.wideMin)
+    expect(r.legs.state).toBe('unknown')
+    expect(read(gapZone, 1).legs.state).toBe('unknown')
+    expect(read(gapZone, STRICT).legs.state).toBe('unknown')
+    // А попадание строгостью не теряется: `wide` остаётся `wide` на всех трёх.
+    for (const strict of [SOFT, 1, STRICT]) {
+      expect(read(BARRIER_DEEP, strict).legs.state).toBe('wide')
+    }
+  })
+
   test('прямые ноги со стопами вне кадра — «не знаю», а не «вместе»', () => {
     // Полоса `together` по коленям закрыта снизу именно ради этого кадра:
     // иначе широко стоящий ребёнок без стоп в кадре получил бы `together`, то
@@ -308,6 +329,13 @@ describe('присед', () => {
     const deep = read({ crouch: 'yes' })
     expect(deep.crouch.state).toBe('yes')
     expect(deep.crouch.measured).toBe(CONFIG.crouch.votesTotal)
+
+    // Сама граница: РОВНО два голоса — уже «да». Просели плечи и бёдра, колено
+    // не согнуто, и этого довольно.
+    const two = read(TWO_VOTES)
+    expect(two.crouch.measured).toBe(CONFIG.crouch.votesRequired)
+    expect(two.crouch.state).toBe('yes')
+    expect(two.knees.state).toBe('straight')
 
     const one = read(ONE_VOTE)
     expect(one.crouch.measured).toBe(1)
@@ -403,6 +431,32 @@ describe('«не знаю» по уверенности точки', () => {
   test('без головы over-head отличить нельзя', () => {
     const r = read({ ...ROCKET, visibilityOf: { nose: 0, leftEye: 0, rightEye: 0 } })
     expect(r.hands.state).toBe('unknown')
+  })
+
+  test('«не знаю» по видимости не несёт числа в журнал', () => {
+    // Контракт `AxisReading`: `NaN` значит «мерить было нечем», и непройденная
+    // точка — ровно этот случай. Координаты у неё есть, но они достроены
+    // моделью: число по ним уехало бы в `perAxis` как настоящее измерение.
+    const r = read({
+      visibilityOf: { leftElbow: 0.2, leftWrist: 0.2, leftKnee: 0, rightKnee: 0 },
+    })
+    for (const axis of ['leftShoulder', 'leftElbow', 'leftForearm', 'support'] as const) {
+      expect(r[axis].state).toBe('unknown')
+      expect(r[axis].measured).toBeNaN()
+    }
+    // Колени вне кадра — и ось колен, и стопа у колена молчат без числа.
+    expect(r.knees.measured).toBeNaN()
+    expect(r.footAtKnee.state).toBe('unknown')
+    expect(r.footAtKnee.measured).toBeNaN()
+    // Кисти: своя точка не видна — числа нет.
+    const hands = read({ visibilityOf: { leftWrist: 0 } })
+    expect(hands.hands.state).toBe('unknown')
+    expect(hands.hands.measured).toBeNaN()
+    // А вот расстояние между видимыми кистями измерено честно: ось «не знаю»
+    // лишь потому, что без линии головы `over-head` не отличить от `in-front`.
+    const noHead = read({ ...ROCKET, visibilityOf: { nose: 0, leftEye: 0, rightEye: 0 } })
+    expect(noHead.hands.state).toBe('unknown')
+    expect(noHead.hands.measured).toBeLessThan(CONFIG.hands.overHead)
   })
 
   test('в профиль без носа не разрешить ближнюю сторону', () => {
