@@ -1,0 +1,275 @@
+/**
+ * Типизированные конструкторы событий журнала (§8 спека,
+ * `docs/log-and-storage.md`).
+ *
+ * Зачем конструкторы, а не вызовы `event('round.judge', {...})` по месту:
+ * журнал читают инструменты разбора (`tools/replay.mjs`,
+ * `tools/log-report.mjs`) и взрослый глазами. Имя события и состав полей —
+ * это их входной формат, и опечатка в нём не ломает ничего сегодня, а
+ * обнаруживается через месяц пустой сводкой. Здесь состав полей проверяет
+ * компилятор.
+ *
+ * Главное поле журнала — `perAxis` у `round.judge`: по нему взрослый читает
+ * «левое плечо 58° при цели 90±30», не переигрывая спорный раунд с ребёнком.
+ * Поэтому `perAxis` сохраняет ВСЁ различение, которое вынесло ядро, —
+ * см. `loggedPerAxis` ниже.
+ */
+
+import type { Axis, MeasuredBy } from '../../core/axes'
+import type { AxisTally, PerAxisSummary } from '../../core/judge'
+import type { AxisOutcome } from '../../core/match'
+import type { PresenceReason } from '../../core/presence'
+import type { AxisRequirements, Orientation } from '../../core/types'
+import type { LogEvent } from './store'
+
+/** Конверт события с точным типом данных: `data` уходит в запись как есть. */
+export type Of<T extends string, D extends object> = { type: T; data: D }
+
+// ───────────────────────── perAxis ─────────────────────────
+
+/**
+ * Одна ось в журнале: исход по окну, измеренное значение и то, чем измерено.
+ *
+ * `measured` — `number | null`, и `null` значит «мерить было нечем»
+ * (`NaN` в ядре). Ноль здесь был бы ложью — «измерили и вышло 0°», — а
+ * выброшенное поле неотличимо от забытого. `NaN` не выживает в JSON, которым
+ * журнал выгружается, поэтому «нечем» записывается явным `null`.
+ *
+ * `measuredBy` есть там, где ось умеет мерить по-разному (сейчас такая одна —
+ * ноги: по стопам и по коленям). Без него «ноги 2.0» не прочесть.
+ */
+export type LoggedAxis = {
+  want: string
+  got: string
+  measured: number | null
+  measuredBy?: MeasuredBy
+  /** `ok` / `miss` / `unmeasured` / `excused` — различение из ядра целиком. */
+  outcome: AxisOutcome
+  ok: boolean
+  /** Сколько валидных кадров окна дали каждый исход. */
+  counts: AxisTally
+}
+
+export type LoggedPerAxis = {
+  axes: Partial<Record<Axis, LoggedAxis>>
+  worst: PerAxisSummary['worst']
+}
+
+/**
+ * Разбор по осям из приговора судьи в вид журнала.
+ *
+ * Кадр-представитель (`sample`) приплюснут к оси: его `want` и `outcome`
+ * совпадают с оконными по построению (`judgeWindow` берёт первый кадр с худшим
+ * исходом окна), так что ничего не теряется, а читать журнал плоским проще.
+ */
+export function loggedPerAxis(p: PerAxisSummary): LoggedPerAxis {
+  const axes: Partial<Record<Axis, LoggedAxis>> = {}
+  for (const [axis, s] of Object.entries(p.axes) as [Axis, PerAxisSummary['axes'][Axis]][]) {
+    if (!s) continue
+    const line: LoggedAxis = {
+      want: s.want,
+      got: s.sample.got,
+      measured: Number.isFinite(s.sample.measured) ? s.sample.measured : null,
+      outcome: s.outcome,
+      ok: s.sample.ok,
+      counts: { ...s.counts },
+    }
+    if (s.sample.measuredBy !== undefined) line.measuredBy = s.sample.measuredBy
+    axes[axis] = line
+  }
+  return { axes, worst: p.worst }
+}
+
+// ───────────────────────── события забега ─────────────────────────
+
+export type RoundPreviewData = {
+  poseId: string
+  mirror: boolean
+  orientation: Orientation
+  /** Требуемые состояния осей — то, с чем сравнивали приговор. */
+  requires: Partial<AxisRequirements>
+  tier: 1 | 2 | 3
+}
+
+export const roundPreview = (d: RoundPreviewData): Of<'round.preview', RoundPreviewData> => ({
+  type: 'round.preview',
+  data: d,
+})
+
+export type RoundWallData = {
+  travelMs: number
+  /** Сдвиг окна судейства на задержку тракта — ВПЕРЁД от касания стены. */
+  latencyShiftMs: number
+}
+
+export const roundWall = (d: RoundWallData): Of<'round.wall', RoundWallData> => ({ type: 'round.wall', data: d })
+
+export type RoundJudgeData = {
+  poseId: string
+  /** Валидных кадров окна, совпавших с позой. */
+  matched: number
+  frames: number
+  valid: number
+  ratio: number
+  perAxis: LoggedPerAxis
+  /** Очков за раунд. */
+  score: number
+  /** Счёт забега после раунда. */
+  total: number
+}
+
+export const roundJudge = (d: Omit<RoundJudgeData, 'perAxis'> & { perAxis: PerAxisSummary }): Of<
+  'round.judge',
+  RoundJudgeData
+> => ({
+  type: 'round.judge',
+  data: { ...d, perAxis: loggedPerAxis(d.perAxis) },
+})
+
+/** Почему раунд не судился или не дал приговора. */
+export type SkipWhy = 'pause' | 'lost' | 'fewFrames' | 'orientation'
+
+export type RoundSkipData = { why: SkipWhy; valid: number }
+
+export const roundSkip = (d: RoundSkipData): Of<'round.skip', RoundSkipData> => ({ type: 'round.skip', data: d })
+
+export type RunStartData = {
+  tier: 1 | 2 | 3
+  durationS: number
+  /** Множитель строгости (`strictness()` из `config.ts`). */
+  strict: number
+  latencyMs: number
+  /**
+   * Откуда кадры. `fake` помечает синтетического игрока: ни один замер не
+   * должен потом быть принят за настоящий.
+   */
+  source: 'camera' | 'fake'
+}
+
+export const runStart = (d: RunStartData): Of<'run.start', RunStartData> => ({ type: 'run.start', data: d })
+
+export type RunFinishData = {
+  score: number
+  rounds: number
+  hits: number
+  misses: number
+  skipped: number
+  tier: 1 | 2 | 3
+  durationS: number
+}
+
+export const runFinish = (d: RunFinishData): Of<'run.finish', RunFinishData> => ({ type: 'run.finish', data: d })
+
+// ───────────────────────── здоровье и пауза ─────────────────────────
+
+/**
+ * Агрегат здоровья конвейера — РАЗ В СЕКУНДУ, не на кадр: запись каждой позы
+ * это десятки мегабайт за сессию при потолке 25 МБ.
+ */
+export type HealthData = {
+  fps: number
+  inferP50: number
+  inferP95: number
+  /** Кадров отброшено, потому что предыдущий ещё в полёте. */
+  drops: number
+  /** Валидных кадров за секунду и кадров без игрока. */
+  valid: number
+  lost: number
+}
+
+export const health = (d: HealthData): Of<'health', HealthData> => ({ type: 'health', data: d })
+
+export const pause = (d: { why: PresenceReason }): Of<'pause', { why: PresenceReason }> => ({
+  type: 'pause',
+  data: d,
+})
+
+export const resume = (d: { afterMs: number }): Of<'resume', { afterMs: number }> => ({ type: 'resume', data: d })
+
+// ───────────────────────── инфраструктурные ─────────────────────────
+
+export type SessionStartData = {
+  startedAt: string
+  /** `ШхВ@dpr` — по нему видно, в каком режиме шла съёмка. */
+  screen: string
+  installed: boolean
+  lang: string
+}
+
+export const sessionStart = (d: SessionStartData): Of<'session.start', SessionStartData> => ({
+  type: 'session.start',
+  data: d,
+})
+
+export const build = (d: { version: string; builtAt?: string }): Of<'build', { version: string; builtAt?: string }> => ({
+  type: 'build',
+  data: d,
+})
+
+export type ErrorData = { message: string; source?: string; line?: number; col?: number }
+
+export const error = (d: ErrorData): Of<'error', ErrorData> => ({ type: 'error', data: d })
+
+export const errorPromise = (d: { reason: string }): Of<'error.promise', { reason: string }> => ({
+  type: 'error.promise',
+  data: d,
+})
+
+export const visibility = (d: { state: 'visible' | 'hidden' }): Of<'visibility', { state: 'visible' | 'hidden' }> => ({
+  type: 'visibility',
+  data: d,
+})
+
+export type CamStartData = { w: number; h: number; facing?: string; deviceId?: string }
+
+export const camStart = (d: CamStartData): Of<'cam.start', CamStartData> => ({ type: 'cam.start', data: d })
+
+export const camFail = (d: { name: string; message: string }): Of<'cam.fail', { name: string; message: string }> => ({
+  type: 'cam.fail',
+  data: d,
+})
+
+/** Android отбирает камеру на звонке: дорожка кончается или глохнет. */
+export const camEnded = (d: { why: 'ended' | 'mute' }): Of<'cam.ended', { why: 'ended' | 'mute' }> => ({
+  type: 'cam.ended',
+  data: d,
+})
+
+export type PoseReadyData = { pipeline: string; delegate: 'GPU' | 'CPU'; warmupMs: number }
+
+export const poseReady = (d: PoseReadyData): Of<'pose.ready', PoseReadyData> => ({ type: 'pose.ready', data: d })
+
+export const poseFail = (d: {
+  pipeline: string
+  message: string
+}): Of<'pose.fail', { pipeline: string; message: string }> => ({ type: 'pose.fail', data: d })
+
+// ───────────────────────── калибровка ─────────────────────────
+
+/**
+ * Снятая калибровка. Времён здесь ДВА, и путать их нельзя: `at` — кадровое,
+ * от старта сессии (та же шкала, что `t` конверта), `takenAtMs` — настенное.
+ * Срок устаревания (14 дней) считается ТОЛЬКО по настенному: кадровое
+ * обнуляется при каждом запуске приложения.
+ */
+export type CalibDoneData = {
+  S0: number
+  shoulderWidth: number
+  aspect: number
+  at: number
+  takenAtMs: number
+  cameraId?: string
+}
+
+export const calibDone = (d: CalibDoneData): Of<'calib.done', CalibDoneData> => ({ type: 'calib.done', data: d })
+
+export const calibNeed = (d: {
+  need: 'more' | 'steady'
+}): Of<'calib.need', { need: 'more' | 'steady' }> => ({ type: 'calib.need', data: d })
+
+export const calibStale = (d: {
+  why: 'age' | 'aspect' | 'camera' | 'missing'
+}): Of<'calib.stale', { why: 'age' | 'aspect' | 'camera' | 'missing' }> => ({ type: 'calib.stale', data: d })
+
+/** Любой конструктор отсюда годится журналу: `write()` берёт конверт как есть. */
+export type AnyEvent = LogEvent
