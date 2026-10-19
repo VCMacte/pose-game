@@ -4,8 +4,8 @@
 человека в кадре, ожидаемой ориентации игрока и поведения при потере трекинга.
 
 Родитель: [`../CLAUDE.md`](../CLAUDE.md).
-Код (запланирован, ещё не написан): `src/core/presence.ts`, `src/core/axes.ts`,
-`src/core/run.ts`.
+Код: `src/core/axes.ts`; запланированы, ещё не написаны —
+`src/core/presence.ts`, `src/core/run.ts`.
 Замысел: [`concept-and-plan.md`](concept-and-plan.md).
 
 ## Причины отказа — в строгом порядке
