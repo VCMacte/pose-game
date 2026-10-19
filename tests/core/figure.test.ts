@@ -1,15 +1,17 @@
 import { describe, expect, test } from 'vitest'
+import { axes, type Axis } from '../../src/core/axes'
 import { CONFIG } from '../../src/core/config'
 import { figure, type Figure } from '../../src/core/figure'
-import { LM, pointAt } from '../../src/core/landmarks'
+import { geometry } from '../../src/core/geometry'
+import { LANDMARK_STRIDE, LM, pointAt } from '../../src/core/landmarks'
 import { POSES } from '../../src/core/poses'
-import type { Landmarks, Pt, PoseSpec } from '../../src/core/types'
+import type { Calibration, Landmarks, Pt, PoseSpec } from '../../src/core/types'
 import { stick, type StickDesc } from '../../src/fake/stick'
 
 /**
  * Порядок звеньев в `Figure.bones` — часть контракта: первые тринадцать
- * выражены точками MediaPipe и потому сверяются с `stick()` поимённо, а шея
- * упирается в окружность головы, которой у скелета нет.
+ * выражены точками MediaPipe и потому читаются в скелет поимённо (см.
+ * `DRAWN`), а шея упирается в окружность головы, которой у скелета нет.
  */
 const B = {
   torso: 0,
@@ -29,8 +31,6 @@ const B = {
 } as const
 
 const BONE_COUNT = 14
-/** Сколько звеньев фигуры выражено точками скелета — все, кроме шеи. */
-const BONES_FROM_LANDMARKS = BONE_COUNT - 1
 
 const mid = (a: Pt, b: Pt): Pt => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 })
 const dist = (a: Pt, b: Pt): number => Math.hypot(a.x - b.x, a.y - b.y)
@@ -81,11 +81,6 @@ function toS(bones: Array<[Pt, Pt]>): (p: Pt) => Pt {
   const c = mid(hipMid, shoulderMid)
   const s = dist(hipMid, shoulderMid)
   return (p: Pt): Pt => ({ x: (p.x - c.x) / s, y: (p.y - c.y) / s })
-}
-
-const pointsOf = (bones: Array<[Pt, Pt]>): Pt[] => {
-  const norm = toS(bones)
-  return bones.flatMap(([a, b]) => [norm(a), norm(b)])
 }
 
 /** Разнос пары точек фигуры в долях её торса. */
@@ -148,33 +143,63 @@ describe('фигура позы', () => {
     expect(rightWrist.y).toBeLessThan(f.head.c.y - f.head.r)
   })
 
-  test('«Плоский Робот» и его зеркало — отражения друг друга по x', () => {
-    const origin = figure(byId('robot'))
-    const mirror = figure(byId('robot-mirror'))
+  test('каждая зеркальная поза — отражение своего оригинала по x', () => {
+    // Все зеркальные пары, а не одна: у «Наклонной башни» и «Рок-звезды»
+    // корпус наклонён, и тогда плечи с бёдрами уже не симметричны
+    // относительно средней линии — проверка накрест ниже только там и бьёт.
+    for (const mirrored of POSES.filter((q) => q.mirror)) {
+      const origin = POSES.find((q) => q.name === mirrored.name && !q.mirror)
+      expect(origin, mirrored.id).toBeDefined()
+      const a = figure(origin!)
+      const b = figure(mirrored)
+      const id = mirrored.id
 
-    expect(mirror.bones).toHaveLength(origin.bones.length)
-    expect(mirror.head.r).toBeCloseTo(origin.head.r, 12)
-    expect(mirror.head.c.x).toBeCloseTo(1 - origin.head.c.x, 12)
-    expect(mirror.head.c.y).toBeCloseTo(origin.head.c.y, 12)
+      expect(b.bones, id).toHaveLength(a.bones.length)
+      expect(b.head.r, id).toBeCloseTo(a.head.r, 12)
+      expect(b.head.c.x, id).toBeCloseTo(1 - a.head.c.x, 12)
+      expect(b.head.c.y, id).toBeCloseTo(a.head.c.y, 12)
 
-    // Зеркало переставляет и стороны тела: левое звено оригинала отражается в
-    // правое звено зеркала.
-    const pairs: Array<[number, number]> = [
-      [B.torso, B.torso],
-      [B.leftUpperArm, B.rightUpperArm],
-      [B.leftForearm, B.rightForearm],
-      [B.leftThigh, B.rightThigh],
-      [B.leftShin, B.rightShin],
-      [B.leftFoot, B.rightFoot],
-      [B.neck, B.neck],
-    ]
-    for (const [a, b] of pairs) {
-      for (const end of [0, 1] as const) {
-        expect(mirror.bones[b][end].x, `${a}→${b}.${end}.x`).toBeCloseTo(
-          1 - origin.bones[a][end].x,
-          12,
-        )
-        expect(mirror.bones[b][end].y, `${a}→${b}.${end}.y`).toBeCloseTo(origin.bones[a][end].y, 12)
+      // Зеркало переставляет и стороны тела: левое звено оригинала отражается
+      // в правое звено зеркала.
+      const pairs: Array<[number, number]> = [
+        [B.torso, B.torso],
+        [B.leftUpperArm, B.rightUpperArm],
+        [B.leftForearm, B.rightForearm],
+        [B.leftThigh, B.rightThigh],
+        [B.leftShin, B.rightShin],
+        [B.leftFoot, B.rightFoot],
+        [B.neck, B.neck],
+      ]
+      for (const [from, to] of pairs) {
+        for (const end of [0, 1] as const) {
+          expect(b.bones[to][end].x, `${id} ${from}→${to}.${end}.x`).toBeCloseTo(
+            1 - a.bones[from][end].x,
+            12,
+          )
+          expect(b.bones[to][end].y, `${id} ${from}→${to}.${end}.y`).toBeCloseTo(
+            a.bones[from][end].y,
+            12,
+          )
+        }
+      }
+
+      // Плечи и бёдра — единственные две кости, где зеркалирование
+      // переставляет КОНЦЫ, а не отображает кость в кость: оба их конца лежат
+      // на разных сторонах тела. Именно там и спряталась бы ошибка индекса,
+      // поэтому их отдельно и накрест: конец `left` зеркала — отражение конца
+      // `right` оригинала.
+      for (const bone of [B.shoulders, B.hips]) {
+        for (const end of [0, 1] as const) {
+          const other = end === 0 ? 1 : 0
+          expect(b.bones[bone][end].x, `${id} ${bone}.${end}.x накрест`).toBeCloseTo(
+            1 - a.bones[bone][other].x,
+            12,
+          )
+          expect(b.bones[bone][end].y, `${id} ${bone}.${end}.y накрест`).toBeCloseTo(
+            a.bones[bone][other].y,
+            12,
+          )
+        }
       }
     }
   })
@@ -237,22 +262,116 @@ describe('фигура позы', () => {
   })
 })
 
-describe('один источник формы', () => {
-  test('форма фигуры совпадает с синтетическим скелетом звено в звено', () => {
+/**
+ * Кадр, в котором судится нарисованная фигура. Числа — обычная дистанция до
+ * камеры: торс 0.22 высоты кадра, тело в середине, пол под опорной стопой.
+ */
+const FRAME = { aspect: 16 / 9, torso: 0.22, x: 0.5, ground: 0.95 } as const
+
+/** Калибровка по нейтральной стойке в том же кадре: ею судятся просадки приседа. */
+function neutralCalibration(): Calibration {
+  const lm = stick(FRAME)
+  const g = geometry(lm, FRAME.aspect)
+  if (g === null) throw new Error('нейтральная стойка не дала годной геометрии')
+  return {
+    S0: g.S,
+    shoulderWidth: g.shoulderRatio * g.S,
+    neutralX: g.cx,
+    neutralShoulderY: g.shoulderMid.y,
+    neutralHipY: g.hipMid.y,
+    aspect: FRAME.aspect,
+    at: 0,
+  }
+}
+
+/** Пара звеньев фигуры → точка MediaPipe: чем именно нарисован каждый сустав. */
+const DRAWN: Array<[number, number, 0 | 1]> = [
+  [LM.leftShoulder, B.shoulders, 0],
+  [LM.rightShoulder, B.shoulders, 1],
+  [LM.leftHip, B.hips, 0],
+  [LM.rightHip, B.hips, 1],
+  [LM.leftElbow, B.leftUpperArm, 1],
+  [LM.rightElbow, B.rightUpperArm, 1],
+  [LM.leftWrist, B.leftForearm, 1],
+  [LM.rightWrist, B.rightForearm, 1],
+  [LM.leftKnee, B.leftThigh, 1],
+  [LM.rightKnee, B.rightThigh, 1],
+  [LM.leftAnkle, B.leftShin, 1],
+  [LM.rightAnkle, B.rightShin, 1],
+  [LM.leftFootIndex, B.leftFoot, 1],
+  [LM.rightFootIndex, B.rightFoot, 1],
+]
+
+/**
+ * Скелет, тело которого взято С КАРТИНКИ: двенадцать суставов и два носка
+ * прочитаны из нарисованных звеньев и переложены в кадр.
+ *
+ * Перекладывается подобием, восстановленным по самой картинке: единица длины —
+ * нарисованный торс, начало — нарисованная середина бёдер. Поэтому рамка
+ * рисунка (её масштаб и якорь) из сравнения уходит — она и не судится, — а
+ * форма остаётся ровно та, что видит ребёнок: разъехавшиеся масштабы по `x` и
+ * `y`, зеркальный переворот или перепутанный сустав уедут в показания осей.
+ *
+ * Лицо, ладони и пятки доезжают от `stick()`: в фигуре их нет вовсе, а
+ * `handsAxis` и `orientationAxis` без них не работают. Якорь по середине бёдер
+ * оставляет тело там, куда его поставил скелет, — опорной стопой на полу, —
+ * иначе просадки приседа судить было бы не от чего.
+ */
+function drawnSkeleton(p: PoseSpec): Landmarks {
+  const f = figure(p)
+  const out = Float32Array.from(stick({ ...FRAME, orientation: p.orientation, ...p.requires }))
+  const [hipMidDrawn, shoulderMidDrawn] = f.bones[B.torso]
+  const unitS = dist(hipMidDrawn, shoulderMidDrawn)
+  const hipX = (out[LM.leftHip * LANDMARK_STRIDE] + out[LM.rightHip * LANDMARK_STRIDE]) / 2
+  const hipY =
+    (out[LM.leftHip * LANDMARK_STRIDE + 1] + out[LM.rightHip * LANDMARK_STRIDE + 1]) / 2
+
+  for (const [lm, bone, end] of DRAWN) {
+    const q = f.bones[bone][end]
+    const base = lm * LANDMARK_STRIDE
+    // `x` делится на отношение сторон — так его нормирует MediaPipe.
+    out[base] = hipX + (((q.x - hipMidDrawn.x) / unitS) * FRAME.torso) / FRAME.aspect
+    out[base + 1] = hipY + ((q.y - hipMidDrawn.y) / unitS) * FRAME.torso
+  }
+  return out
+}
+
+describe('картинка → скелет → приговор', () => {
+  test('нарисованная фигура каждой позы читается судейством как её requires', () => {
+    // Та самая цепочка, которую проходит ребёнок: он видит вырез, встаёт в
+    // него, камера судит. Проверять её обязательно: сверять фигуру с
+    // синтетическим скелетом стало нечем — кинематика у них одна, и такая
+    // сверка сравнивала бы код с собой. Здесь же вторая сторона независима:
+    // `axes()` ничего не знает о том, как поза построена, и читает только
+    // картинку.
+    const cal = neutralCalibration()
+    let checked = 0
+
     for (const p of POSES) {
-      const got = pointsOf(figure(p).bones.slice(0, BONES_FROM_LANDMARKS))
-      const want = pointsOf(skeletonBones(skeleton(p)))
-      expect(got.length, p.id).toBe(want.length)
-      // Точнее сверить нельзя: скелет отдаёт точки во Float32Array, и его
-      // собственная точность — около 1e-7. Разъехавшееся соглашение видно на
-      // порядок 0.1 S, то есть этот допуск строже нужного в десятки тысяч раз.
-      for (let i = 0; i < want.length; i++) {
-        expect(got[i].x, `${p.id} точка ${i}.x`).toBeCloseTo(want[i].x, 5)
-        expect(got[i].y, `${p.id} точка ${i}.y`).toBeCloseTo(want[i].y, 5)
+      const lm = drawnSkeleton(p)
+      const g = geometry(lm, FRAME.aspect)
+      expect(g, p.id).not.toBeNull()
+      const readings = axes(lm, g!, cal, 1)
+
+      // Ориентация в `requires` не живёт — её владелец `PoseSpec`, — но кадр не
+      // с той ориентацией невалиден, и прочитаться она обязана.
+      expect(readings.orientation.state, `${p.id}: ориентация`).toBe(p.orientation)
+      checked += 1
+
+      for (const [axis, want] of Object.entries(p.requires) as Array<[Axis, unknown]>) {
+        const got = readings[axis]
+        expect(got.state, `${p.id}: ось ${axis} (измерено ${got.measured.toFixed(2)})`).toBe(want)
+        checked += 1
       }
     }
-  })
 
+    // Сторож от вырожденного прогона: пустой `requires` или сломанный обход
+    // дали бы зелёный тест, не проверив ничего.
+    expect(checked).toBeGreaterThan(190)
+  })
+})
+
+describe('один источник формы', () => {
   test('окружность головы накрывает лицо скелета', () => {
     const FACE = [
       LM.nose,
@@ -282,20 +401,15 @@ describe('один источник формы', () => {
     }
   })
 
-  test('разнос колен приседающей фигуры — тот же, что у скелета, и в своей полосе', () => {
+  test('разнос колен нарисованного приседа лежит в полосе, которую поза требует', () => {
+    // Со скелетом этот разнос больше не сверяется: кинематика у них одна, и
+    // такая сверка сравнивала бы код с собой. Сверяется то, что НЕ выведено из
+    // неё, — полосы `CONFIG.legs.knee`, по которым ось ног судит присед при
+    // невидимых стопах. Разъехавшись с ними, нарисованный присед дал бы промах
+    // ребёнку, повторившему его в точности.
     for (const id of ['barrier', 'crab']) {
-      const p = byId(id)
-      const f = figure(p)
+      const f = figure(byId(id))
       const kneeGap = spanInS(f, f.bones[B.leftThigh][1], f.bones[B.rightThigh][1])
-
-      const bones = skeletonBones(skeleton(p))
-      const want =
-        dist(bones[B.leftThigh][1], bones[B.rightThigh][1]) /
-        dist(bones[B.torso][0], bones[B.torso][1])
-
-      expect(kneeGap, id).toBeCloseTo(want, 5)
-      // Полосы `legs.knee` выведены из этой же кинематики: нарисованный присед
-      // обязан попадать в ту полосу, которую поза требует (`legs: wide`).
       expect(kneeGap, id).toBeGreaterThanOrEqual(CONFIG.legs.knee.wideMin)
       expect(kneeGap, id).toBeLessThanOrEqual(CONFIG.legs.knee.wideMax)
     }
