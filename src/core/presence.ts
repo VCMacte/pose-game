@@ -21,6 +21,8 @@ import type { Orientation } from './types'
  *   кадром,** и доверенное значение обновляется ТОЛЬКО на подтверждённых
  *   кадрах. С предыдущим кадром защита рассыпается: подмена, растянутая на
  *   несколько кадров, проходит незамеченной — каждый отдельный шаг мал.
+ * - **Проверка размера торса симметрична** — ловит и рост (вошли ближе), и
+ *   убыль (вошли дальше) против одного и того же порога `torsoGrowth`.
  * - **Время приходит аргументом.** `performance.now()` здесь сделал бы автомат
  *   непроверяемым и сломал бы replay журнала из node.
  */
@@ -101,7 +103,7 @@ function reason(
 
   if (gm.vis < CONFIG.visibility.min) return 'lowvis'
 
-  if (trusted(st, t) && (jumped(gm, st) || grown(gm, st))) return 'jump'
+  if (trusted(st, t) && (jumped(gm, st) || scaleJumped(gm, st))) return 'jump'
 
   if (gm.S > c.scale.torsoMax) return 'scale'
   if (gm.shoulderRatio * gm.S < c.scale.shoulderMin) return 'scale'
@@ -128,9 +130,17 @@ function jumped(gm: Geometry, st: PresenceState): boolean {
   return Math.abs(gm.cx - st.trustedCx!) > CONFIG.presence.jump.cx
 }
 
-/** Рост торса кратно: другой человек встал ближе к камере. */
-function grown(gm: Geometry, st: PresenceState): boolean {
-  return gm.S > st.trustedS! * CONFIG.presence.jump.torsoGrowth
+/**
+ * Торс изменился кратно: другой человек встал ближе (торс вырос) ИЛИ дальше
+ * (торс сжался) от камеры. Проверка симметрична: один и тот же порог
+ * `torsoGrowth` держит обе границы, иначе они могли бы разъехаться. Это не
+ * перестраховка — человек дальше ребёнка — самый частый случай, и оказавшись
+ * лишь на ~0.2 ширины кадра в стороне, он не ловится скачком центра вовсе.
+ */
+function scaleJumped(gm: Geometry, st: PresenceState): boolean {
+  const ratio = gm.S / st.trustedS!
+  const bound = CONFIG.presence.jump.torsoGrowth
+  return ratio > bound || ratio < 1 / bound
 }
 
 /**
