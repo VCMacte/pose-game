@@ -78,7 +78,12 @@ export type StickDesc = {
   rightForearm?: ForearmState | number
   nearForearm?: ForearmState | number
   farForearm?: ForearmState | number
-  /** Кисти сводятся поворотом руки в плече — локоть и предплечье при этом целы. */
+  /**
+   * Кисти сводятся доворотом руки вокруг плеча: угол в локте при этом цел, а
+   * ОПИСАННЫЕ состояния плеча и предплечья доворот перебивать не вправе — он
+   * перебирает остатки свободы (сторону сгиба и второй корень доворота) и
+   * падает, если ни на одном описанная рука не осталась в своих полосах.
+   */
   hands: HandsState
   /** Расстояние между кистями в долях торса — им кисть ставится рядом с порогом. */
   handGap?: number
@@ -258,14 +263,15 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
     return own ?? paired
   }
 
-  const shoulderStateOf = (side: Side): ShoulderState | number =>
+  /** Описанное плечо, либо `undefined`: умолчание `down` — не описание. */
+  const shoulderDescOf = (side: Side): ShoulderState | number | undefined =>
     pickSide(
       side,
       side === 'left' ? d.leftShoulder : d.rightShoulder,
       d.nearShoulder,
       d.farShoulder,
       'плечо',
-    ) ?? 'down'
+    )
   const elbowStateOf = (side: Side): ElbowState | number =>
     pickSide(side, side === 'left' ? d.leftElbow : d.rightElbow, d.nearElbow, d.farElbow, 'локоть') ??
     'straight'
@@ -374,8 +380,42 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
   const wrist: Record<Side, Pt> = { left: v(0, 0), right: v(0, 0) }
   const palm: Record<Side, Pt[]> = { left: [], right: [] }
 
+  /** Угол звена `a→b` от вертикали — та же мера, в которой его судит ядро. */
+  const limbAngleOf = (a: Pt, b: Pt, side: Side): number =>
+    Math.atan2((b.x - a.x) * limbSign(side), -(b.y - a.y)) / D2R
+  /** Отклонение точки от средней линии корпуса: им ядро опознаёт «на камеру». */
+  const devFromMid = (p: Pt): number => Math.abs(p.x * across.x + p.y * across.y)
+  /** Расхождение углов по кругу: 180° и −180° — один угол. */
+  const angleDev = (a: number, b: number): number => Math.abs(((a - b + 540) % 360) - 180)
+
+  /**
+   * Уцелело ли ОПИСАННОЕ состояние звена после доворота руки под кисти.
+   * Умолчание (плечо `down`, незаданное предплечье) описанием не считается —
+   * его доворот вправе менять, и именно на нём держится «Космическая ракета»:
+   * прямые руки вверх при сведённых кистях физически наклонены внутрь.
+   * Числом задан ровно тот угол, поэтому доворота он не терпит вовсе.
+   */
+  const keptLimb = (
+    desc: ShoulderState | ForearmState | number | undefined,
+    angle: number,
+    tolerance: number,
+    nearMid: boolean,
+  ): boolean => {
+    if (desc === undefined) return true
+    if (typeof desc === 'number') return angleDev(angle, desc) < 1e-6
+    // «На камеру» фронт и профиль судят по-разному: во фронте — отклонением от
+    // средней линии корпуса, в профиль — тем же углом 90°, что и `side`, ведь
+    // там рука по линии взгляда лежит в кадре поперёк.
+    if (desc === 'front') return profile ? angleDev(angle, LIMB_ANGLE.side) < tolerance : nearMid
+    return angleDev(angle, LIMB_ANGLE[desc]) < tolerance
+  }
+
+  /** Поза руки целиком: одна из тех, между которыми ещё остался выбор. */
+  type Arm = { elbow: Pt; wrist: Pt; palm: Pt[] }
+
   for (const side of ['left', 'right'] as const) {
-    const shoulderState = shoulderStateOf(side)
+    const shoulderDesc = shoulderDescOf(side)
+    const shoulderState = shoulderDesc ?? 'down'
     const elbowState = elbowStateOf(side)
     const forearmState = forearmStateOf(side)
     const elbowDeg =
@@ -386,13 +426,18 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
     }
 
     const upper = limbDir(shoulderState, side)
-    elbow[side] = add(shoulder(side), mul(upper, UPPER_ARM))
+    const elbowAt = add(shoulder(side), mul(upper, UPPER_ARM))
 
-    let fore: Pt
+    /**
+     * Направления предплечья, между которыми выбор ещё есть. Их два и только
+     * тогда, когда локоть согнут, а предплечье не описано: сам угол в локте
+     * этим выбором не меняется, меняется лишь сторона сгиба.
+     */
+    let fores: Pt[]
     if (!bent) {
-      fore = upper
+      fores = [upper]
     } else if (forearmState !== undefined) {
-      fore = limbDir(forearmState, side)
+      fores = [limbDir(forearmState, side)]
     } else {
       // Локоть согнут, а предплечье не задано: сгибаем так, чтобы угол в
       // локте вышел ровно заданным, а кисть ушла вверх.
@@ -400,7 +445,7 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
       const a = rot(unit(upper), turn)
       const b = rot(unit(upper), -turn)
       const outward = limbSign(side)
-      fore =
+      const first =
         Math.abs(a.y - b.y) > 1e-9
           ? a.y < b.y
             ? a
@@ -408,41 +453,100 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
           : a.x * outward >= b.x * outward
             ? a
             : b
+      fores = [first, first === a ? b : a]
     }
-    wrist[side] = add(elbow[side], mul(fore, FOREARM))
 
-    const along = unit(fore)
-    const sideways = v(-along.y, along.x)
-    palm[side] = [
-      add(wrist[side], mul(along, HAND * 0.9)), // pinky
-      add(wrist[side], mul(along, HAND)), // index
-      add(add(wrist[side], mul(along, HAND * 0.6)), mul(sideways, 0.04)), // thumb
-    ]
-  }
+    const armOf = (fore: Pt): Arm => {
+      const at = add(elbowAt, mul(fore, FOREARM))
+      const along = unit(fore)
+      const sideways = v(-along.y, along.x)
+      return {
+        elbow: elbowAt,
+        wrist: at,
+        palm: [
+          add(at, mul(along, HAND * 0.9)), // pinky
+          add(at, mul(along, HAND)), // index
+          add(add(at, mul(along, HAND * 0.6)), mul(sideways, 0.04)), // thumb
+        ],
+      }
+    }
+    const options = fores.map(armOf)
 
-  if (d.hands !== 'no') {
+    if (d.hands === 'no') {
+      const arm = options[0]
+      elbow[side] = arm.elbow
+      wrist[side] = arm.wrist
+      palm[side] = arm.palm
+      continue
+    }
+
+    // Кисти сводятся доворотом руки вокруг плеча — угол в локте при этом цел,
+    // а вот абсолютные углы плеча и предплечья доворот МЕНЯЕТ. Поэтому
+    // перебираются все остатки свободы (сторона сгиба × два корня доворота) и
+    // берётся первый, на котором описанные состояния ещё читаются как заданы.
+    // Молча пересобрать руку под кисти, затерев описание, нельзя: тогда поза,
+    // судящая и кисти, и плечо, невыразима вовсе.
+    const root = shoulder(side)
     const gap = d.handGap ?? HAND_GAP
-    for (const side of ['left', 'right'] as const) {
-      const root = shoulder(side)
-      // Насколько надо довернуть руку, чтобы кисть встала на свою половину зазора.
-      const wanted = lat(side) * (gap / 2) - (root.x * across.x + root.y * across.y)
-      const arm = sub(wrist[side], root)
-      const a = arm.x * across.x + arm.y * across.y
-      const b = arm.x * across.y - arm.y * across.x
+    /** Куда по поперечнику корпуса обязана встать кисть этой стороны. */
+    const wanted = lat(side) * (gap / 2) - (root.x * across.x + root.y * across.y)
+    const tried: string[] = []
+    let placed: Arm | null = null
+
+    for (const arm of options) {
+      const span = sub(arm.wrist, root)
+      const a = span.x * across.x + span.y * across.y
+      const b = span.x * across.y - span.y * across.x
       const radius = Math.hypot(a, b)
-      let turn = 0
+      let turns: number[] = [0]
       if (radius > 0) {
         const delta = Math.acos(Math.max(-1, Math.min(1, wanted / radius))) / D2R
         const base = Math.atan2(b, a) / D2R
         const first = base + delta
         const second = base - delta
-        turn = Math.abs(first) <= Math.abs(second) ? first : second
+        turns = Math.abs(first) <= Math.abs(second) ? [first, second] : [second, first]
       }
-      const swing = (p: Pt): Pt => add(root, rot(sub(p, root), turn))
-      elbow[side] = swing(elbow[side])
-      wrist[side] = swing(wrist[side])
-      palm[side] = palm[side].map(swing)
+      for (const turn of turns) {
+        const swing = (p: Pt): Pt => add(root, rot(sub(p, root), turn))
+        const swung: Arm = {
+          elbow: swing(arm.elbow),
+          wrist: swing(arm.wrist),
+          palm: arm.palm.map(swing),
+        }
+        const shoulderAngle = limbAngleOf(root, swung.elbow, side)
+        const forearmAngle = limbAngleOf(swung.elbow, swung.wrist, side)
+        const kept =
+          keptLimb(
+            shoulderDesc,
+            shoulderAngle,
+            CONFIG.shoulder.tolerance,
+            devFromMid(swung.elbow) < CONFIG.shoulder.front &&
+              devFromMid(swung.wrist) < CONFIG.shoulder.front,
+          ) &&
+          keptLimb(
+            forearmState,
+            forearmAngle,
+            CONFIG.forearm.tolerance,
+            devFromMid(swung.wrist) < CONFIG.shoulder.front,
+          )
+        if (kept) {
+          placed = swung
+          break
+        }
+        tried.push(`плечо ${shoulderAngle.toFixed(0)}°, предплечье ${forearmAngle.toFixed(0)}°`)
+      }
+      if (placed !== null) break
     }
+
+    if (placed === null) {
+      throw new Error(
+        `stick: кисти ${d.hands} не сводятся, не выведя описанную руку (${side}) из её полос — ` +
+          `перебрано: ${tried.join('; ')}`,
+      )
+    }
+    elbow[side] = placed.elbow
+    wrist[side] = placed.wrist
+    palm[side] = placed.palm
   }
 
   // --- голова -------------------------------------------------------------

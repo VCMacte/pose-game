@@ -268,6 +268,38 @@ describe('состояния осей попадают в полосы CONFIG, �
     expect(at(LM.leftWrist).y).toBeGreaterThan(-1)
   })
 
+  test('описанное плечо переживает требование к кистям', () => {
+    // Доворот руки под кисти — удобство для НЕ описанной руки: он довинчивает
+    // плечо, пока его состояние не задано. Описанное плечо он перебивать не
+    // вправе, иначе ни одна поза не может судить и кисти, и плечо сразу — а
+    // «Низкий барьер» ровно такая поза. Вместе с ней это чинит и задачу 7:
+    // промах ровно по одной оси выразим только там, где остальные уцелели.
+    const shoulderAngle = (desc: Partial<StickDesc>): number => {
+      const at = reader(stick(desc))
+      return limbAngle(at(LM.leftShoulder), at(LM.leftElbow), 1)
+    }
+    const chest: Partial<StickDesc> = {
+      leftShoulder: 'down',
+      rightShoulder: 'down',
+      leftElbow: 'bent',
+      rightElbow: 'bent',
+      hands: 'in-front',
+    }
+    // Предплечье не задано — выбор сгиба за фикстурой, и плечо обязано остаться
+    // в полосе `down`. Именно здесь доворот раньше уводил его в `front`.
+    expect(deviation(shoulderAngle(chest), 180)).toBeLessThan(CONFIG.shoulder.tolerance)
+    // Предплечье задано `in` — свободы не осталось вовсе, плечо всё равно цело.
+    expect(
+      deviation(shoulderAngle({ ...chest, leftForearm: 'in', rightForearm: 'in' }), 180),
+    ).toBeLessThan(CONFIG.shoulder.tolerance)
+    // А невыполнимое сочетание падает, а не рисует молча другое плечо: при
+    // плече `side` и предплечье `in` локоть разогнут в 0°, и кисти к груди не
+    // сводятся ни одним доворотом, который оставил бы плечо в полосе.
+    expect(() =>
+      stick({ ...chest, leftShoulder: 'side', rightShoulder: 'side', leftForearm: 'in', rightForearm: 'in' }),
+    ).toThrow(/кисти/)
+  })
+
   test('кисти no — руки по умолчанию врозь', () => {
     const at = reader(stick({ hands: 'no' }))
     expect(dist(at(LM.leftWrist), at(LM.rightWrist))).toBeGreaterThan(CONFIG.hands.overHead)
