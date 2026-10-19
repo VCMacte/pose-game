@@ -29,6 +29,11 @@ import { stick, type StickDesc } from '../../src/fake/stick'
  *   Ориентация режима молча отвергла бы все профильные раунды целиком.
  * - **Время забега на паузе стоит, прерванный раунд даёт `skip`** и счёта не
  *   трогает: ребёнок не отвечает за то, что трекер его потерял.
+ * - **Ядро не возобновляет забег само.** Подтверждённый возврат поднимает
+ *   `canResume`, но забег остаётся на паузе, и часы его стоят, пока оболочка
+ *   не позовёт `resume`: отсчёт «3, 2, 1» рисует она, и часы под ним идти не
+ *   должны — иначе ребёнок теряет три секунды забега за паузу, которой не
+ *   устраивал.
  * - **Часов внутри нет.** Время приходит аргументом `tick`, иначе replay
  *   журнала из node невозможен; на это стоит отдельный тест по исходнику.
  */
@@ -248,16 +253,69 @@ describe('пауза', () => {
     expect(soon.phase).toBe('paused')
     expect(soon.round).toBeNull()
 
-    const back = drive(
-      run,
-      backAt + CONFIG.presence.resumeMs - PERIOD + PERIOD,
-      backAt + CONFIG.presence.resumeMs + 2 * PERIOD,
-      comeback,
-    )
+    expect(soon.canResume).toBe(false)
+
+    const readyT = backAt + CONFIG.presence.resumeMs + 2 * PERIOD
+    const ready = drive(run, backAt + CONFIG.presence.resumeMs, readyT, comeback)
+    // Готовность есть, а продолжения нет: его зовёт оболочка, дорисовав отсчёт.
+    expect(ready.phase).toBe('paused')
+    expect(ready.canResume).toBe(true)
+    expect(ready.round).toBeNull()
+
+    const back = run.resume(ticks(backAt + CONFIG.presence.resumeMs, readyT).at(-1)!)
     expect(back.phase).toBe('running')
     expect(back.round).not.toBeNull()
     expect(back.round!.startT).toBeGreaterThanOrEqual(backAt + CONFIG.presence.resumeMs)
     expect(back.roundPhase).toBe('preview')
+  })
+
+  test('часы забега стоят между готовностью и явным возобновлением', () => {
+    const run = makeRun(opts())
+    const backAt = lostFrom + CONFIG.presence.pauseMs + 2_000
+    const comeback: How = (t, pose, i) => (t >= backAt ? right(t, pose, i) : vanish(t, pose, i))
+
+    const readyAt = ticks(START, START + 60_000).find((t) => t >= backAt + CONFIG.presence.resumeMs)!
+    const ready = drive(run, START, readyAt, comeback)
+    expect(ready.phase).toBe('paused')
+    const frozen = ready.elapsedMs
+
+    // Оболочка ведёт свой отсчёт «3, 2, 1»: почти три секунды, за которые
+    // идущие часы съели бы больше половины раунда — будь они не остановлены,
+    // это было бы видно на `elapsedMs` невооружённым глазом.
+    const countdownEnd = readyAt + 2_900
+    const waited = drive(run, readyAt + PERIOD, countdownEnd, comeback)
+    expect(waited.phase).toBe('paused')
+    expect(waited.canResume).toBe(true)
+    expect(waited.elapsedMs).toBe(frozen)
+
+    // Продолжение — только явным вызовом, и часы идут с него, а не с готовности.
+    const lastT = ticks(readyAt + PERIOD, countdownEnd).at(-1)!
+    const resumed = run.resume(lastT)
+    expect(resumed.phase).toBe('running')
+    expect(resumed.canResume).toBe(false)
+    expect(resumed.elapsedMs).toBe(frozen)
+    expect(resumed.round!.startT).toBe(lastT)
+
+    // Не идемпотентен: второй вызов — ошибка оболочки, и она её увидит.
+    expect(() => run.resume(lastT)).toThrow(/паузы нет/)
+  })
+
+  test('ошибочный вызов возобновления оболочка заметит', () => {
+    const run = makeRun(opts())
+    // Паузы ещё нет вовсе.
+    expect(() => run.resume(START)).toThrow(/паузы нет/)
+
+    const at = lostFrom + CONFIG.presence.pauseMs + PERIOD
+    const paused = drive(run, START, at, vanish)
+    expect(paused.phase).toBe('paused')
+    // Возврат не подтверждён: ребёнка не видно вовсе.
+    expect(paused.canResume).toBe(false)
+    expect(() => run.resume(at)).toThrow(/возврат не подтверждён/)
+    // Отказ не сдвинул ни фазу, ни часы.
+    expect(run.state.phase).toBe('paused')
+    expect(run.state.elapsedMs).toBe(paused.elapsedMs)
+    // Время назад не идёт.
+    expect(() => run.resume(START)).toThrow(/время идёт назад/)
   })
 
   test('после запроса паузы не судится ничего', () => {
