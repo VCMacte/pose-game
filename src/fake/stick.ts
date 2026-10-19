@@ -53,6 +53,15 @@ export type StickDesc = {
   orientation: Orientation
   /** Куда смотрит тело в профиль: `right` — в сторону `+x` кадра. */
   facing: 'left' | 'right'
+  /**
+   * Доля боковых размеров тела, остающаяся в кадре: ею задаётся недовёрнутое
+   * тело. 1 — строго фронт, `PROFILE_LATERAL` (0.29) — строгий профиль, а
+   * числа между дают `shoulderRatio` в полосе «не знаю» между порогами
+   * ориентации.
+   * Работает и при `orientation: 'front'`: разворот тела — не то же, что выбор
+   * того, какие конечности в кадре вырождаются.
+   */
+  profileLateral?: number
   /** Состояние плеча либо угол вектора плечо→локоть от вертикали. */
   leftShoulder?: ShoulderState | number
   rightShoulder?: ShoulderState | number
@@ -71,6 +80,8 @@ export type StickDesc = {
   farForearm?: ForearmState | number
   /** Кисти сводятся поворотом руки в плече — локоть и предплечье при этом целы. */
   hands: HandsState
+  /** Расстояние между кистями в долях торса — им кисть ставится рядом с порогом. */
+  handGap?: number
   /** Состояние разноса стоп либо сам разнос в долях торса. */
   legs: LegsState | number
   /** Опора; при опоре на одну ногу `legs` не участвует — стопа встаёт под центр. */
@@ -79,12 +90,29 @@ export type StickDesc = {
   raisedKnee?: number
   /** Состояние наклона корпуса либо угол от вертикали (в профиль — к взгляду). */
   lean: LeanState | number
-  /** Присед сгибает колени глубже, чем `knees`, и перебивает его. */
-  crouch: 'no' | 'yes'
+  /**
+   * Присед сгибает колени глубже, чем `knees`, и перебивает его. Числом
+   * задаётся угол в колене — им присед ставится любой глубины, в том числе
+   * рядом с порогом.
+   */
+  crouch: 'no' | 'yes' | number
+  /**
+   * Опускает всю фигуру в кадре на столько долей торса, не меняя кинематики
+   * (опорная стопа уезжает с `ground` — это сознательное исключение из
+   * «тело стоит на полу»). Так голоса приседа по высоте бёдер и плеч
+   * отвязываются от угла в колене: присед судится голосованием 2 из 3, и
+   * кадр ровно с одним голосом иначе не собрать. Отрицательное — поднимает.
+   */
+  bodyDrop?: number
   /** Состояние колен либо угол бедро–колено–стопа. */
   knees: 'straight' | 'bent' | number
   /** «Цифра 4»: стопа поднятой ноги у колена опорной. */
   footAtKnee: boolean
+  /**
+   * То же расстояние стопа–колено опорной ноги числом, в долях торса: им
+   * «Цифра 4» ставится рядом с порогом. Перебивает `footAtKnee`.
+   */
+  footToKnee?: number
   /** `visibility` всех точек. */
   visibility: number
   /** `visibility` отдельных точек — ею проверяются «не знаю» и уход стоп из кадра. */
@@ -206,7 +234,7 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
   }
   /** Знак, в который растут углы конечностей этой стороны. */
   const limbSign = (side: Side): number => (profile ? facing : lat(side))
-  const latScale = profile ? PROFILE_LATERAL : 1
+  const latScale = d.profileLateral ?? (profile ? PROFILE_LATERAL : 1)
 
   /** Сводит пару `left`/`right` с парой `near`/`far` и падает на двойном задании. */
   function pickSide<T>(
@@ -276,14 +304,14 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
     add(shoulderMid, mul(across, lat(side) * SHOULDER_HALF * latScale))
 
   // --- ноги ---------------------------------------------------------------
-  const kneeDeg =
-    d.crouch === 'yes'
-      ? CROUCH_KNEE
-      : typeof d.knees === 'number'
-        ? d.knees
-        : d.knees === 'bent'
-          ? BENT_ANGLE
-          : 180
+  /** Угол в колене: присед перебивает `knees`, число перебивает состояние. */
+  const kneeAngle = (): number => {
+    if (typeof d.crouch === 'number') return d.crouch
+    if (d.crouch === 'yes') return CROUCH_KNEE
+    if (typeof d.knees === 'number') return d.knees
+    return d.knees === 'bent' ? BENT_ANGLE : 180
+  }
+  const kneeDeg = kneeAngle()
   const reach = 2 * THIGH * Math.sin((kneeDeg / 2) * D2R)
   const spread = typeof d.legs === 'number' ? d.legs : LEG_SPREAD[d.legs]
   const kneeBend = (side: Side): Pt => (profile ? v(facing, 0) : v(lat(side), 0))
@@ -306,19 +334,32 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
     const stand: Side = d.support
     const raised: Side = stand === 'left' ? 'right' : 'left'
     standLeg(stand, 0)
+    // Стопа у колена опорной ноги и высоко поднятое колено тянут в разные
+    // стороны, поэтому при «Цифре 4» колено по умолчанию ниже.
+    const atKnee = d.footToKnee !== undefined || d.footAtKnee
     const lift =
       d.raisedKnee ??
-      (d.footAtKnee
-        ? CONFIG.support.kneeHeightDiff + 0.15
-        : CONFIG.support.kneeHeightDiff * 2)
+      (atKnee ? CONFIG.support.kneeHeightDiff + 0.15 : CONFIG.support.kneeHeightDiff * 2)
     const kneeY = knee[stand].y - lift
     const root = hip(raised)
     const out = profile ? facing : lat(raised)
     const dy = kneeY - root.y
     knee[raised] = v(root.x + out * Math.sqrt(Math.max(THIGH * THIGH - dy * dy, 0)), kneeY)
-    ankle[raised] = d.footAtKnee
-      ? add(knee[raised], mul(unit(sub(knee[stand], knee[raised])), SHIN))
-      : add(knee[raised], mul(unit(v(out * 0.35, 1)), SHIN))
+    if (d.footToKnee !== undefined) {
+      // Стопа на голени от поднятого колена и на заданном расстоянии от
+      // опорного — та же засечка двух звеньев, что и у самого колена.
+      ankle[raised] = joint(knee[raised], knee[stand], SHIN, d.footToKnee, v(-out, 1))
+      const got = len(sub(ankle[raised], knee[stand]))
+      if (Math.abs(got - d.footToKnee) > 0.01) {
+        throw new Error(
+          `stick: стопа не достаёт до ${d.footToKnee} S от колена опорной ноги (вышло ${got.toFixed(2)}) — подвиньте raisedKnee`,
+        )
+      }
+    } else if (d.footAtKnee) {
+      ankle[raised] = add(knee[raised], mul(unit(sub(knee[stand], knee[raised])), SHIN))
+    } else {
+      ankle[raised] = add(knee[raised], mul(unit(v(out * 0.35, 1)), SHIN))
+    }
   }
 
   // --- руки ---------------------------------------------------------------
@@ -373,10 +414,11 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
   }
 
   if (d.hands !== 'no') {
+    const gap = d.handGap ?? HAND_GAP
     for (const side of ['left', 'right'] as const) {
       const root = shoulder(side)
       // Насколько надо довернуть руку, чтобы кисть встала на свою половину зазора.
-      const wanted = lat(side) * (HAND_GAP / 2) - (root.x * across.x + root.y * across.y)
+      const wanted = lat(side) * (gap / 2) - (root.x * across.x + root.y * across.y)
       const arm = sub(wrist[side], root)
       const a = arm.x * across.x + arm.y * across.y
       const b = arm.x * across.y - arm.y * across.x
@@ -424,7 +466,7 @@ export function stick(desc: Partial<StickDesc> = {}): Landmarks {
 
   // --- проекция в кадр ----------------------------------------------------
   const floor = d.support === 'both' ? Math.max(ankle.left.y, ankle.right.y) : ankle[d.support].y
-  const y0 = d.ground - floor * d.torso
+  const y0 = d.ground - (floor - (d.bodyDrop ?? 0)) * d.torso
   const out = new Float32Array(LANDMARK_COUNT * LANDMARK_STRIDE)
   const put = (i: number, p: Pt): void => {
     const base = i * LANDMARK_STRIDE

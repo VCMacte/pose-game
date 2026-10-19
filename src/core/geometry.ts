@@ -13,7 +13,7 @@ export type Geometry = {
   cx: number
   /** То же, но в единицах `y`: им считают расстояния вместе с `S`. */
   cxh: number
-  /** Средняя `visibility` плеч и бёдер. */
+  /** Средняя `visibility` плеч и бёдер. Всегда в `[0, 1]` — ни NaN, ни за полосой. */
   vis: number
   /** Ширина плеч в долях торса: ею отличают фронт от профиля. */
   shoulderRatio: number
@@ -33,6 +33,12 @@ const ANCHORS = [LM.leftShoulder, LM.rightShoulder, LM.leftHip, LM.rightHip] as 
  * кадра (считать углы без поправки значит считать их неверно и молча) или торс
  * выродился в точку. Низкая `visibility` на `null` НЕ отображается — она
  * приезжает в `vis`, а «не знаю» вместо промаха решается осями и судьёй.
+ *
+ * Нечисловая `visibility` опорной точки — такой же негодный кадр, как
+ * нечисловая координата, и даёт `null`. Молча пропустить её нельзя: NaN уехал
+ * бы в `vis`, и каждое сравнение `vis >= порог` дальше читалось бы как «не
+ * уверен» — то есть игра судила бы по тому, чего не видела, и выглядело бы это
+ * как честный отказ. Годные числа вне `[0, 1]` подрезаются до полосы.
  */
 export function geometry(lm: Landmarks | null, aspect: number | null): Geometry | null {
   if (lm === null || aspect === null) return null
@@ -43,9 +49,11 @@ export function geometry(lm: Landmarks | null, aspect: number | null): Geometry 
   let sumVis = 0
   for (const i of ANCHORS) {
     const p = pointAt(lm, i)
-    if (!Number.isFinite(p.x) || !Number.isFinite(p.y)) return null
+    if (!Number.isFinite(p.x) || !Number.isFinite(p.y) || !Number.isFinite(p.visibility)) {
+      return null
+    }
     sumX += p.x
-    sumVis += p.visibility
+    sumVis += Math.min(1, Math.max(0, p.visibility))
   }
 
   const ls = pointAt(lm, LM.leftShoulder)

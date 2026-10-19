@@ -75,6 +75,20 @@ test('нечисловая координата опорной точки даё
   expect(geometry(lm, ASPECT)).toBeNull()
 })
 
+test('нечисловая visibility опорной точки даёт null, а не тихий NaN в vis', () => {
+  // NaN в `vis` прошёл бы молча: каждое сравнение `vis >= порог` дальше читается
+  // как «не уверен», и игра судит по тому, чего не видела.
+  const lm = stick({ visibilityOf: { leftHip: Number.NaN } })
+  expect(geometry(lm, ASPECT)).toBeNull()
+})
+
+test('visibility за полосой [0, 1] подрезается, а не уезжает в vis', () => {
+  const high = geometry(stick({ visibility: 1.5 }), ASPECT)!
+  expect(high.vis).toBe(1)
+  const low = geometry(stick({ visibility: -0.5 }), ASPECT)!
+  expect(low.vis).toBe(0)
+})
+
 test('vis — среднее visibility плеч и бёдер', () => {
   const g = geometry(stick({ visibility: 0.5, visibilityOf: { leftShoulder: 0.1 } }), ASPECT)!
   expect(g.vis).toBeCloseTo((0.1 + 0.5 + 0.5 + 0.5) / 4, 6)

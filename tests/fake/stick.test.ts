@@ -374,32 +374,152 @@ test('камера видит одно и то же тело с разных д�
   expect(far.shoulderRatio).toBeCloseTo(near.shoulderRatio, 5)
 })
 
-test('по каждой требуемой оси выразим промах ровно по ней — это и нужно задаче 7', () => {
-  // Рок-звезда: ноги wide, одно плечо up локоть straight, другое down локоть bent.
-  const pose: Partial<StickDesc> = {
+describe('кадр рядом с порогом собирается числом — иначе его не на чем судить', () => {
+  test('недовёрнутое тело попадает в полосу «не знаю» между профилем и фронтом', () => {
+    // Полоса между порогами ориентации — та, на которой судья обязан отказать
+    // по присутствию, а не промахнуться: собрать её нечем, если боковое
+    // смещение в профиль — константа модуля.
+    const ratio = geometry(stick({ profileLateral: 0.65 }), ASPECT)!.shoulderRatio
+    expect(ratio).toBeGreaterThan(CONFIG.orientation.profile)
+    expect(ratio).toBeLessThan(CONFIG.orientation.front)
+  })
+
+  test('handGap ставит кисти по обе стороны порога', () => {
+    const gap = (handGap: number): number => {
+      const at = reader(stick({ leftShoulder: 'up', rightShoulder: 'up', hands: 'over-head', handGap }))
+      return dist(at(LM.leftWrist), at(LM.rightWrist))
+    }
+    expect(gap(CONFIG.hands.overHead - 0.02)).toBeLessThan(CONFIG.hands.overHead)
+    expect(gap(CONFIG.hands.overHead + 0.02)).toBeGreaterThan(CONFIG.hands.overHead)
+  })
+
+  test('footToKnee ставит стопу по обе стороны порога «Цифры 4»', () => {
+    const toKnee = (footToKnee: number): number => {
+      const at = reader(stick({ support: 'left', footToKnee }))
+      return dist(at(LM.rightAnkle), at(LM.leftKnee))
+    }
+    expect(toKnee(CONFIG.footAtKnee.distance - 0.03)).toBeLessThan(CONFIG.footAtKnee.distance)
+    expect(toKnee(CONFIG.footAtKnee.distance + 0.03)).toBeGreaterThan(CONFIG.footAtKnee.distance)
+  })
+
+  test('недостижимое расстояние стопа–колено падает громко', () => {
+    expect(() => stick({ support: 'left', footToKnee: 0.1 })).toThrow(/колен/)
+  })
+
+  test('присед собирается ровно с одним голосом из трёх', () => {
+    // Голосов у приседа три (угол в колене, высота бёдер, высота плеч), и
+    // засчитывается он по двум. Кадр с одним голосом — согнутое колено при
+    // бёдрах и плечах на прежней высоте: его собирает `crouch` числом плюс
+    // `bodyDrop`, которым фигура возвращается наверх.
+    const up = geometry(stick({}), ASPECT)!
+    const sank = geometry(stick({ crouch: 75 }), ASPECT)!
+    // Насколько присед сам опустил бёдра — ровно столько и вернуть наверх.
+    const drop = (sank.hipMid.y - up.hipMid.y) / sank.S
+    expect(drop).toBeGreaterThan(0.5)
+
+    const desc = { crouch: 75, bodyDrop: -drop } as const
+    const one = geometry(stick(desc), ASPECT)!
+    const at = reader(stick(desc))
+
+    const knee = jointAngle(at(LM.leftHip), at(LM.leftKnee), at(LM.leftAnkle))
+    expect(knee).toBeGreaterThan(CONFIG.elbow.bentMin)
+    expect(knee).toBeLessThan(CONFIG.elbow.bentMax)
+    expect(Math.abs(one.hipMid.y - up.hipMid.y)).toBeLessThan(0.01 * one.S)
+    expect(Math.abs(one.shoulderMid.y - up.shoulderMid.y)).toBeLessThan(0.01 * one.S)
+    // Торс при этом не вырос — подошедшим к камере такой кадр не притворяется.
+    expect(one.S).toBeCloseTo(up.S, 6)
+  })
+})
+
+describe('по каждой требуемой оси выразим промах ровно по ней — это и нужно задаче 7', () => {
+  /**
+   * Какими полями описания задаётся каждая ось. Промах по оси обязан менять
+   * только их: «не равно правильной позе» проверкой НЕ является — его
+   * удовлетворяет любая правка любого поля.
+   */
+  const AXIS_KEYS: Record<string, ReadonlyArray<keyof StickDesc>> = {
+    orientation: ['orientation', 'facing', 'profileLateral'],
+    shoulder: ['leftShoulder', 'rightShoulder', 'nearShoulder', 'farShoulder'],
+    elbow: ['leftElbow', 'rightElbow', 'nearElbow', 'farElbow'],
+    forearm: ['leftForearm', 'rightForearm', 'nearForearm', 'farForearm'],
+    hands: ['hands', 'handGap'],
+    legs: ['legs'],
+    support: ['support', 'raisedKnee'],
+    lean: ['lean'],
+    crouch: ['crouch', 'bodyDrop'],
+    knees: ['knees'],
+    footAtKnee: ['footAtKnee', 'footToKnee'],
+  }
+
+  /** Рок-звезда: ноги wide, одно плечо up локоть straight, другое down локоть bent. */
+  const ROCK: Partial<StickDesc> = {
     legs: 'wide',
     leftShoulder: 'up',
     rightShoulder: 'down',
     rightElbow: 'bent',
     rightForearm: 'up',
   }
-  const misses: Record<string, Partial<StickDesc>> = {
-    // Боковых состояний в этой позе нет, поэтому её хватает повернуть целиком.
-    orientation: { orientation: 'profile' },
-    shoulder: { leftShoulder: 'side' },
-    elbow: { rightElbow: 'straight', rightForearm: undefined },
-    forearm: { rightForearm: 'down' },
-    hands: { leftShoulder: 'down', leftElbow: 'bent', leftForearm: 'in', hands: 'in-front' },
-    legs: { legs: 'together' },
-    support: { support: 'left' },
-    lean: { lean: 'lean-left' },
-    crouch: { crouch: 'yes' },
-    knees: { knees: 'bent' },
-    footAtKnee: { support: 'left', footAtKnee: true },
-  }
-  const right = stick(pose)
-  for (const [axis, miss] of Object.entries(misses)) {
-    const wrong = stick({ ...pose, ...miss })
-    expect(wrong, axis).not.toEqual(right)
-  }
+
+  /**
+   * У каждой оси своя правильная поза: промах выходит одноосевым только
+   * тогда, когда предпосылка оси в позе уже выполнена. Кисти требуют руки,
+   * способной их свести, «Цифра 4» — опоры на одной ноге, а локоть — руки,
+   * у которой предплечье не задано (при прямом локте его судить не на чем,
+   * и описание с ним падает).
+   */
+  const cases: Array<{ axis: string; base: Partial<StickDesc>; miss: Partial<StickDesc> }> = [
+    // Боковых состояний в рок-звезде нет, поэтому её хватает повернуть целиком.
+    { axis: 'orientation', base: ROCK, miss: { orientation: 'profile' } },
+    { axis: 'shoulder', base: ROCK, miss: { leftShoulder: 'side' } },
+    {
+      axis: 'elbow',
+      base: { legs: 'wide', leftShoulder: 'up', rightShoulder: 'down', rightElbow: 'bent' },
+      miss: { rightElbow: 'straight' },
+    },
+    { axis: 'forearm', base: ROCK, miss: { rightForearm: 'down' } },
+    {
+      axis: 'hands',
+      base: {
+        legs: 'wide',
+        leftShoulder: 'down',
+        rightShoulder: 'down',
+        leftElbow: 'bent',
+        rightElbow: 'bent',
+        leftForearm: 'in',
+        rightForearm: 'in',
+        hands: 'no',
+      },
+      miss: { hands: 'in-front' },
+    },
+    { axis: 'legs', base: ROCK, miss: { legs: 'together' } },
+    { axis: 'support', base: ROCK, miss: { support: 'left' } },
+    { axis: 'lean', base: ROCK, miss: { lean: 'lean-left' } },
+    { axis: 'crouch', base: ROCK, miss: { crouch: 'yes' } },
+    { axis: 'knees', base: ROCK, miss: { knees: 'bent' } },
+    {
+      axis: 'footAtKnee',
+      base: { ...ROCK, support: 'left', footAtKnee: false },
+      miss: { footAtKnee: true },
+    },
+  ]
+
+  test.each(cases.map((c) => [c.axis, c] as const))('ось %s', (axis, c) => {
+    const wrong = { ...c.base, ...c.miss }
+    const keys = new Set<string>([...Object.keys(c.base), ...Object.keys(wrong)])
+    const changed = [...keys].filter(
+      (k) => wrong[k as keyof StickDesc] !== c.base[k as keyof StickDesc],
+    )
+
+    // Промах есть, и он задан ровно полями своей оси — ни одного чужого поля.
+    expect(changed.length, axis).toBeGreaterThan(0)
+    expect(changed.sort(), axis).toEqual(
+      changed.filter((k) => AXIS_KEYS[axis].includes(k as keyof StickDesc)).sort(),
+    )
+    // И он виден в кадре: оба описания строятся, а скелеты различны.
+    expect(stick(wrong), axis).not.toEqual(stick(c.base))
+  })
+
+  test('перечислены все оси, по которым судят позы', () => {
+    expect(cases.map((c) => c.axis).sort()).toEqual(Object.keys(AXIS_KEYS).sort())
+  })
 })
