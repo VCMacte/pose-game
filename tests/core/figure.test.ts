@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'vitest'
 import { axes, type Axis } from '../../src/core/axes'
-import { CONFIG } from '../../src/core/config'
+import { CONFIG, strictness } from '../../src/core/config'
 import { figure, type Figure } from '../../src/core/figure'
 import { geometry } from '../../src/core/geometry'
 import { LANDMARK_STRIDE, LM, pointAt } from '../../src/core/landmarks'
@@ -336,6 +336,17 @@ function drawnSkeleton(p: PoseSpec): Landmarks {
   return out
 }
 
+/**
+ * Все три настройки строгости, а не только норма.
+ *
+ * Требование постоянное: нарисованный вырез обязан проходить СВОИ ЖЕ
+ * `requires` при любой родительской настройке. Иначе при «строго» картинка
+ * непроходима как нарисована — ребёнок, повторивший её в точности, получает
+ * промах, и объяснить ему это нечем. Проверка на одной норме этого не видит:
+ * «строго» сжимает допуски до 0.75, и тонкий запас уходит в минус именно там.
+ */
+const LEVELS: Array<'soft' | 'normal' | 'strict'> = ['soft', 'normal', 'strict']
+
 describe('картинка → скелет → приговор', () => {
   test('нарисованная фигура каждой позы читается судейством как её requires', () => {
     // Та самая цепочка, которую проходит ребёнок: он видит вырез, встаёт в
@@ -351,23 +362,29 @@ describe('картинка → скелет → приговор', () => {
       const lm = drawnSkeleton(p)
       const g = geometry(lm, FRAME.aspect)
       expect(g, p.id).not.toBeNull()
-      const readings = axes(lm, g!, cal, 1)
 
-      // Ориентация в `requires` не живёт — её владелец `PoseSpec`, — но кадр не
-      // с той ориентацией невалиден, и прочитаться она обязана.
-      expect(readings.orientation.state, `${p.id}: ориентация`).toBe(p.orientation)
-      checked += 1
+      for (const level of LEVELS) {
+        const readings = axes(lm, g!, cal, strictness(level))
 
-      for (const [axis, want] of Object.entries(p.requires) as Array<[Axis, unknown]>) {
-        const got = readings[axis]
-        expect(got.state, `${p.id}: ось ${axis} (измерено ${got.measured.toFixed(2)})`).toBe(want)
+        // Ориентация в `requires` не живёт — её владелец `PoseSpec`, — но кадр
+        // не с той ориентацией невалиден, и прочитаться она обязана.
+        expect(readings.orientation.state, `${p.id} @${level}: ориентация`).toBe(p.orientation)
         checked += 1
+
+        for (const [axis, want] of Object.entries(p.requires) as Array<[Axis, unknown]>) {
+          const got = readings[axis]
+          expect(
+            got.state,
+            `${p.id} @${level}: ось ${axis} (измерено ${got.measured.toFixed(4)})`,
+          ).toBe(want)
+          checked += 1
+        }
       }
     }
 
     // Сторож от вырожденного прогона: пустой `requires` или сломанный обход
-    // дали бы зелёный тест, не проверив ничего.
-    expect(checked).toBeGreaterThan(190)
+    // дали бы зелёный тест, не проверив ничего. 197 утверждений на настройку.
+    expect(checked).toBeGreaterThan(190 * LEVELS.length)
   })
 })
 
