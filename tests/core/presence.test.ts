@@ -105,13 +105,26 @@ test('порядок причин: lowvis → jump → scale → orientation →
 })
 
 test('каждая причина очистки срабатывает и в одиночку — очистка не вакуумна', () => {
-  expect(presence(g({ visibility: 0.2 }), 0, trusting(0.5, 0.22), 'front').why).toBe('lowvis')
-  expect(presence(g({ x: 0.1 }), 0, trusting(0.5, 0.22), 'front').why).toBe('jump')
-  expect(presence(g({ torso: 0.5 }), 0, trusting(0.5, 0.5), 'front').why).toBe('scale')
-  expect(presence(g({ orientation: 'profile' }), 0, trusting(0.5, 0.22), 'front').why).toBe(
-    'orientation',
-  )
-  expect(presence(g({ x: 0.1 }), 0, trusting(0.1, 0.22), 'front').why).toBe('edge')
+  expect(presence(g({ visibility: 0.2 }), 0, trusting(0.5, 0.22), 'front')).toEqual({
+    ok: false,
+    why: 'lowvis',
+  })
+  expect(presence(g({ x: 0.1 }), 0, trusting(0.5, 0.22), 'front')).toEqual({
+    ok: false,
+    why: 'jump',
+  })
+  expect(presence(g({ torso: 0.5 }), 0, trusting(0.5, 0.5), 'front')).toEqual({
+    ok: false,
+    why: 'scale',
+  })
+  expect(presence(g({ orientation: 'profile' }), 0, trusting(0.5, 0.22), 'front')).toEqual({
+    ok: false,
+    why: 'orientation',
+  })
+  expect(presence(g({ x: 0.1 }), 0, trusting(0.1, 0.22), 'front')).toEqual({
+    ok: false,
+    why: 'edge',
+  })
 })
 
 // --- jump: защита от второго человека в кадре ------------------------------
@@ -208,6 +221,17 @@ test('нижняя граница scale мерится шириной плеч �
   ).toEqual({ ok: false, why: 'scale' })
 })
 
+test('присед против доверенного торса СТОЯ — не jump: торс почти не меняется', () => {
+  // trustedS = 0.22 (стойка), крадущийся торс 0.1 — ratio ≈ 0.4545, с явным
+  // запасом от нижней границы jump (1/3 ≈ 0.333) и тем более от scale.
+  const ratio = 0.1 / 0.22
+  expect(ratio).toBeCloseTo(0.4545, 4)
+  expect(ratio).toBeGreaterThan(1 / CONFIG.presence.jump.torsoGrowth)
+
+  const st = trusting(0.5, 0.22)
+  expect(presence(g({ torso: 0.1 }), 0, st, 'front')).toEqual({ ok: true })
+})
+
 test('слишком близко — по длине торса: присед её только укорачивает', () => {
   expect(presence(g({ torso: 0.44 }), 0, trusting(0.5, 0.44), 'front')).toEqual({ ok: true })
   expect(presence(g({ torso: 0.46 }), 0, trusting(0.5, 0.46), 'front')).toEqual({
@@ -238,8 +262,14 @@ test('в профильном раунде боком — норма, фронт
 // --- edge ------------------------------------------------------------------
 
 test('игрок у любого края кадра даёт edge', () => {
-  expect(presence(g({ x: 0.1 }), 0, trusting(0.1, 0.22), 'front').why).toBe('edge')
-  expect(presence(g({ x: 0.9 }), 0, trusting(0.9, 0.22), 'front').why).toBe('edge')
+  expect(presence(g({ x: 0.1 }), 0, trusting(0.1, 0.22), 'front')).toEqual({
+    ok: false,
+    why: 'edge',
+  })
+  expect(presence(g({ x: 0.9 }), 0, trusting(0.9, 0.22), 'front')).toEqual({
+    ok: false,
+    why: 'edge',
+  })
   expect(presence(g({ x: 0.2 }), 0, trusting(0.2, 0.22), 'front')).toEqual({ ok: true })
 })
 

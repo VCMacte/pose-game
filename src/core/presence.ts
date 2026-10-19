@@ -31,7 +31,7 @@ import type { Orientation } from './types'
 export type PresenceReason = 'none' | 'lowvis' | 'jump' | 'scale' | 'orientation' | 'edge'
 
 /** Приговор присутствия для одного кадра. `why` есть ровно при `ok: false`. */
-export type PresenceVerdict = { ok: boolean; why?: PresenceReason }
+export type PresenceVerdict = { ok: true } | { ok: false; why: PresenceReason }
 
 /**
  * Память присутствия между кадрами. Меняется `presence()` на месте: это
@@ -74,12 +74,12 @@ export function presence(
   st: PresenceState,
   expect: Orientation,
 ): PresenceVerdict {
-  const why = reason(gm, t, st, expect)
+  const r = reason(gm, t, st, expect)
 
-  if (why === undefined) {
+  if (r.ok) {
     // Доверенный торс обновляется ЗДЕСЬ и только здесь — на подтверждённом кадре.
-    st.trustedS = gm!.S
-    st.trustedCx = gm!.cx
+    st.trustedS = r.gm.S
+    st.trustedCx = r.gm.cx
     st.badSince = null
     st.goodSince = st.goodSince ?? t
     return { ok: true }
@@ -87,47 +87,54 @@ export function presence(
 
   st.badSince = st.badSince ?? t
   st.goodSince = null
-  return { ok: false, why }
+  return { ok: false, why: r.why }
 }
 
-/** Первая сработавшая причина отказа, либо `undefined`, если кадр годен. */
+/** Итог проверки причин: либо геометрия годного кадра, либо первая сработавшая причина. */
+type ReasonResult = { ok: true; gm: Geometry } | { ok: false; why: PresenceReason }
+
+/** Первая сработавшая причина отказа, либо годная геометрия кадра. */
 function reason(
   gm: Geometry | null,
   t: number,
   st: PresenceState,
   expect: Orientation,
-): PresenceReason | undefined {
-  if (gm === null) return 'none'
+): ReasonResult {
+  if (gm === null) return { ok: false, why: 'none' }
 
   const c = CONFIG.presence
 
-  if (gm.vis < CONFIG.visibility.min) return 'lowvis'
+  if (gm.vis < CONFIG.visibility.min) return { ok: false, why: 'lowvis' }
 
-  if (trusted(st, t) && (jumped(gm, st) || scaleJumped(gm, st))) return 'jump'
+  const trust = trusted(st, t)
+  if (trust !== null && (jumped(gm, trust) || scaleJumped(gm, trust))) {
+    return { ok: false, why: 'jump' }
+  }
 
-  if (gm.S > c.scale.torsoMax) return 'scale'
-  if (gm.shoulderRatio * gm.S < c.scale.shoulderMin) return 'scale'
+  if (gm.S > c.scale.torsoMax) return { ok: false, why: 'scale' }
+  if (gm.shoulderRatio * gm.S < c.scale.shoulderMin) return { ok: false, why: 'scale' }
 
-  if (!oriented(gm, expect)) return 'orientation'
+  if (!oriented(gm, expect)) return { ok: false, why: 'orientation' }
 
-  if (gm.cx < c.edge.margin || gm.cx > 1 - c.edge.margin) return 'edge'
+  if (gm.cx < c.edge.margin || gm.cx > 1 - c.edge.margin) return { ok: false, why: 'edge' }
 
-  return undefined
+  return { ok: true, gm }
 }
 
 /**
- * Есть ли субъект, с которым сравнивать. Доверие истекает за время паузы: на
- * паузе судейства нет, и первый видимый кадр после неё заводит субъекта
- * заново. Иначе ребёнок, вернувшийся не на то же место, получал бы `jump`
- * вечно — забег запирался бы насмерть.
+ * Есть ли субъект, с которым сравнивать, и если да — его торс и центр.
+ * Доверие истекает за время паузы: на паузе судейства нет, и первый видимый
+ * кадр после неё заводит субъекта заново. Иначе ребёнок, вернувшийся не на то
+ * же место, получал бы `jump` вечно — забег запирался бы насмерть.
  */
-function trusted(st: PresenceState, t: number): boolean {
-  return st.trustedS !== null && st.trustedCx !== null && !pauseRequested(st, t)
+function trusted(st: PresenceState, t: number): { S: number; cx: number } | null {
+  if (st.trustedS === null || st.trustedCx === null || pauseRequested(st, t)) return null
+  return { S: st.trustedS, cx: st.trustedCx }
 }
 
 /** Скачок центра тела: другой человек встал в кадр рядом. */
-function jumped(gm: Geometry, st: PresenceState): boolean {
-  return Math.abs(gm.cx - st.trustedCx!) > CONFIG.presence.jump.cx
+function jumped(gm: Geometry, trust: { cx: number }): boolean {
+  return Math.abs(gm.cx - trust.cx) > CONFIG.presence.jump.cx
 }
 
 /**
@@ -137,8 +144,8 @@ function jumped(gm: Geometry, st: PresenceState): boolean {
  * перестраховка — человек дальше ребёнка — самый частый случай, и оказавшись
  * лишь на ~0.2 ширины кадра в стороне, он не ловится скачком центра вовсе.
  */
-function scaleJumped(gm: Geometry, st: PresenceState): boolean {
-  const ratio = gm.S / st.trustedS!
+function scaleJumped(gm: Geometry, trust: { S: number }): boolean {
+  const ratio = gm.S / trust.S
   const bound = CONFIG.presence.jump.torsoGrowth
   return ratio > bound || ratio < 1 / bound
 }
