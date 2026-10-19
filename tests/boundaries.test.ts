@@ -27,7 +27,7 @@ function listFiles(dir: string): string[] {
 
 test('ядро не импортирует адаптеры и оболочку', () => {
   const coreFiles = listFiles(join(ROOT, 'src/core')).filter((f) => f.endsWith('.ts'))
-  const forbidden = /from\s+['"](\.\.\/adapters|\.\.\/shell|adapters\/|shell\/)/
+  const forbidden = /from\s+['"][.\/]*(adapters|shell)\//
 
   const violations: string[] = []
   for (const file of coreFiles) {
