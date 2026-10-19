@@ -364,6 +364,13 @@ describe('строгость', () => {
     expect(read({ knees: 155 }, STRICT).knees.state).toBe('unknown')
   })
 
+  test('мягкий допуск, налезший на соседнее состояние, даёт «не знаю»', () => {
+    // 63° — уже `horizontal` (> 60°), но мягкая полоса наклона (±26° вокруг
+    // 40°) достаёт и до него: различить их на этом кадре нечем.
+    expect(read({ lean: 63 }, 1).lean.state).toBe('horizontal')
+    expect(read({ lean: 63 }, SOFT).lean.state).toBe('unknown')
+  })
+
   test('масштабирует допуски по расстоянию', () => {
     const wide: Desc = { ...ROCKET, handGap: 0.45 }
     expect(read(wide, SOFT).hands.state).toBe('over-head')
