@@ -102,6 +102,11 @@ function seedSession(
   })
 }
 
+/** Ждёт условия по макрозадачам: сброс по порогу очереди назначен таймером. */
+async function until(cond: () => boolean, tries = 200): Promise<void> {
+  for (let i = 0; i < tries && !cond(); i++) await new Promise((r) => setTimeout(r, 0))
+}
+
 /** Журнал на живой (фальшивой) базе с управляемыми часами. */
 function journal(over: Partial<JournalDeps> = {}): { log: Journal; dbName: string } {
   const dbName = over.dbName ?? freshDb()
@@ -155,6 +160,69 @@ describe('конверт записи', () => {
     const { events } = await readAll(dbName)
     expect(events.map((e) => e.t)).toEqual([0, 60_000, 65_000])
     expect(events[2]?.type).toBe('run.start')
+  })
+
+  test('полезная нагрузка не подделывает и не стирает поля конверта', async () => {
+    const c = clock(0)
+    const { log, dbName } = journal({ now: c.now, sessionId: 24 })
+
+    /* Имена `t`, `type`, `k`, `session` ходовые, и событие с таким полем
+       раньше молча занимало место конверта: время записи, её тип, её ключ.
+       Журнал, сообщающий неправду о времени, хуже отсутствующего. */
+    c.set(40)
+    log.event('error', { t: 999, type: 'подделка', k: 42, session: 777, _n: 500, _lastT: 7, message: 'boom' })
+    c.set(80)
+    log.event('error', { t: 999, type: 'подделка', k: 42, session: 777, _n: 500, _lastT: 7, message: 'второй' })
+    await log.flush()
+
+    const { events } = await readAll(dbName)
+    expect(events).toHaveLength(2)
+    expect(events.map((e) => e.t)).toEqual([40, 80])
+    expect(events.map((e) => e.type)).toEqual(['error', 'error'])
+    expect(events.map((e) => e.session)).toEqual([24, 24])
+    expect(events.map((e) => e.message)).toEqual(['boom', 'второй'])
+    // Склейка не подделана: это две записи, а не одна с 500 повторами.
+    expect(events.map((e) => e._n)).toEqual([undefined, undefined])
+    expect(events.map((e) => e._lastT)).toEqual([undefined, undefined])
+    // `k` — keyPath стора: занятый нагрузкой, он сорвал бы вторую запись
+    // конфликтом ключей, а вместе с транзакцией — и весь журнал.
+    expect(new Set(events.map((e) => e.k)).size).toBe(2)
+    expect(log.broken).toBe(false)
+  })
+})
+
+// ─────────────── порог очереди: единственное неограниченное место ───────────────
+
+describe('порог байт в очереди', () => {
+  test('очередь переросла queueBytes — сброс не ждёт flushMs', async () => {
+    const { log, dbName } = journal({ now: clock(0).now, sessionId: 25 })
+
+    // Очередь — единственное место журнала без потолка: между двумя сбросами
+    // в неё помещается сколько угодно. 20 x 16 КБ переваливают порог.
+    const big = 'x'.repeat(16 * 1024)
+    for (let i = 0; i < 20; i++) log.event('error', { message: `${big}${i}` })
+
+    await until(() => log.queued === 0)
+    expect(log.queued).toBe(0)
+    expect((await readAll(dbName)).events).toHaveLength(20)
+  })
+
+  test('очередь ниже порога досрочного сброса не вызывает', async () => {
+    const { log, dbName } = journal({ now: clock(0).now, sessionId: 26 })
+    log.event('pause', { why: 'none' })
+
+    await until(() => log.queued === 0, 5)
+    expect(log.queued).toBe(1)
+    expect((await readAll(dbName)).events).toEqual([])
+  })
+
+  test('байты очереди видны в status — счётчик не украшение', async () => {
+    const { log } = journal({ now: clock(0).now, sessionId: 27 })
+    const before = (await log.status()).bytes
+    log.event('error', { message: 'y'.repeat(4096) })
+    const after = await log.status()
+    expect(after.bytes).toBeGreaterThan(before + 4000)
+    expect(after.share).toBeCloseTo(after.bytes / LIMITS.bytes, 10)
   })
 })
 
@@ -281,6 +349,18 @@ describe('потолки и автоочистка', () => {
     expect(st.share).toBeCloseTo(st.bytes / LIMITS.bytes, 10)
   })
 
+  test('status считает склеенные записи очереди по счётчику повторов', async () => {
+    const { log } = journal({ now: clock(0).now, sessionId: 28 })
+
+    // Залипший признак — одна запись в очереди и 400 событий. Это число
+    // служебный экран показывает родителю, и «1» на нём было бы неправдой.
+    for (let i = 0; i < 400; i++) log.event('error', { message: 'залипло' })
+    expect(log.queued).toBe(1)
+
+    const st = await log.status()
+    expect(st.events).toBe(400)
+  })
+
   test('sweepExported помечает чужие сессии и удаляет помеченные в прошлый раз', async () => {
     const dbName = freshDb()
     await seedSession(dbName, { id: 1, bytes: 10, events: 1 })
@@ -385,6 +465,135 @@ describe('недоступная IndexedDB не мешает игре играт
     await log.flush()
     for (let i = 0; i < 1000; i++) log.event('b', { i })
     expect(log.queued).toBe(0)
+  })
+})
+
+// ───────────── отказ ОПЕРАЦИИ не разоружает запись (Finding 1) ─────────────
+
+describe('отказ чтения не выключает журнал', () => {
+  /**
+   * База, которая открывается и ПИШЕТ как обычно, но у которой отказывает
+   * ЧТЕНИЕ: `getAll()` в readonly-транзакции бросает.
+   *
+   * Так выглядит `DataError` или сорванная аллокация на дампе в 25 МБ: отказала
+   * операция, а не база. Если такой отказ поднимает `broken`, то родитель,
+   * один раз нажавший «СОХРАНИТЬ И ПОДЕЛИТЬСЯ» или открывший служебный экран,
+   * до конца сессии остаётся без журнала — и молча, потому что сломалось ровно
+   * то, что об этом сообщило бы.
+   */
+  const readsFailIdb = (fails: (mode: IDBTransactionMode) => boolean, real: IDBFactory = indexedDB): IDBFactory => {
+    const pass = <T extends object>(t: T, p: string | symbol): unknown => {
+      const v = Reflect.get(t, p) as unknown
+      return typeof v === 'function' ? (v as (...a: unknown[]) => unknown).bind(t) : v
+    }
+    const wrapStore = (s: IDBObjectStore): IDBObjectStore =>
+      new Proxy(s, {
+        get: (t, p) =>
+          p === 'getAll'
+            ? () => {
+                throw new DOMException('читать нечем', 'DataError')
+              }
+            : pass(t, p),
+      })
+    const wrapTx = (tx: IDBTransaction): IDBTransaction =>
+      new Proxy(tx, {
+        get: (t, p) =>
+          p === 'objectStore'
+            ? (name: string) => (fails(t.mode) ? wrapStore(t.objectStore(name)) : t.objectStore(name))
+            : pass(t, p),
+      })
+    const wrapDb = (db: IDBDatabase): IDBDatabase =>
+      new Proxy(db, {
+        get: (t, p) =>
+          p === 'transaction'
+            ? (...args: unknown[]) =>
+                wrapTx((t.transaction as (...a: unknown[]) => IDBTransaction).apply(t, args))
+            : pass(t, p),
+      })
+    return {
+      open: (name: string, version?: number) => {
+        const req = real.open(name, version as number)
+        return new Proxy(req, { get: (t, p) => (p === 'result' ? wrapDb(t.result) : pass(t, p)) })
+      },
+    } as unknown as IDBFactory
+  }
+
+  const shellDeps = () => ({
+    download: () => true,
+    canShare: () => false,
+    share: async () => {},
+  })
+
+  test('неудавшийся save не останавливает запись до конца сессии', async () => {
+    const dbName = freshDb()
+    const c = clock(0)
+    // Отказывает только чтение дампа (readonly); запись и очистка целы.
+    const log = makeJournal({
+      dbName,
+      idb: readsFailIdb((m) => m === 'readonly'),
+      now: c.now,
+      sessionId: 21,
+      ...shellDeps(),
+    })
+
+    log.event('a')
+    const res = await log.save()
+
+    // Дамп не собрался — это честный отказ выгрузки…
+    expect(res.saved).toBe(false)
+    // …но база пригодна, и журнал обязан продолжать писать.
+    expect(log.broken).toBe(false)
+
+    c.set(50)
+    log.event('b')
+    await log.flush()
+
+    const { events } = await readAll(dbName)
+    expect(events.map((e) => e.type)).toEqual(['a', 'b'])
+  })
+
+  test('неудавшийся status не останавливает запись: смотреть диагностику безопасно', async () => {
+    const dbName = freshDb()
+    const c = clock(0)
+    const log = makeJournal({ dbName, idb: readsFailIdb((m) => m === 'readonly'), now: c.now, sessionId: 22 })
+
+    log.event('a')
+    await log.flush()
+
+    const st = await log.status()
+    expect(st.broken).toBe(false)
+    expect(log.broken).toBe(false)
+
+    c.set(70)
+    log.event('b')
+    await log.flush()
+
+    const { events } = await readAll(dbName)
+    expect(events.map((e) => e.type)).toEqual(['a', 'b'])
+  })
+
+  test('неудавшийся sweepExported не останавливает запись', async () => {
+    const dbName = freshDb()
+    const c = clock(0)
+    await seedSession(dbName, { id: 1, bytes: 10, events: 1 })
+    // Выключатель: отказ включается ровно на время уборки, чтобы сломалась
+    // именно она, а не сброс очереди рядом.
+    let broken = false
+    const log = makeJournal({ dbName, idb: readsFailIdb(() => broken), now: c.now, sessionId: 23 })
+
+    log.event('a')
+    await log.flush()
+    broken = true
+    expect(await log.sweepExported()).toEqual({ sessions: 0, marked: 0, bytes: 0 })
+    broken = false
+    expect(log.broken).toBe(false)
+
+    c.set(90)
+    log.event('b')
+    await log.flush()
+
+    const { events } = await readAll(dbName)
+    expect(events.filter((e) => e.session === 23).map((e) => e.type)).toEqual(['a', 'b'])
   })
 })
 
@@ -689,6 +898,26 @@ describe('цена журнала', () => {
     await log.flush()
     expect(opened).toBe(1)
     await log.flush() // очередь пуста — в базу не ходим
+    expect(opened).toBe(1)
+  })
+
+  test('даже перейдя порог очереди, event не открывает базу сам', async () => {
+    const real = new IDBFactory()
+    const counting = {
+      open: (name: string, version?: number) => {
+        opened++
+        return real.open(name, version as number)
+      },
+    } as unknown as IDBFactory
+
+    const log = makeJournal({ dbName: freshDb(), idb: counting, now: clock(0).now, sessionId: 29 })
+    const big = 'x'.repeat(16 * 1024)
+    for (let i = 0; i < 20; i++) log.event('error', { message: `${big}${i}` })
+    // Порог торопит таймер, а не пишет на месте: покадровый путь в базу не
+    // ходит ни при каких обстоятельствах.
+    expect(opened).toBe(0)
+
+    await until(() => log.queued === 0)
     expect(opened).toBe(1)
   })
 })

@@ -47,6 +47,17 @@ export const LIMITS = Object.freeze({
    * отличить «упало 500 раз» от «упало 500 раз и падает до сих пор».
    */
   repeat: 500,
+  /**
+   * Байт в очереди, после которых сброс не ждёт `flushMs`, а назначается сразу.
+   *
+   * Очередь — единственное место журнала, которое ничем не ограничено: между
+   * двумя сбросами в неё помещается сколько угодно. Обычные две секунды игры —
+   * это десятки килобайт (агрегат раз в секунду, события раунда), и даже пара
+   * всплесков строк скелета (по ~40 КБ) порога не достают: он для потока,
+   * которого никто не предвидел. Сброс при этом всё равно откладывается на
+   * таймер — покадровый путь в базу не ходит ни при каких обстоятельствах.
+   */
+  queueBytes: 256 * 1024,
   /** Строк скелета в кольце — окно судейства целиком, а не пара кадров. */
   rawLines: 45,
   /** Всплесков строк скелета ЗА ЗАБЕГ: пишутся только спорные моменты. */
@@ -183,6 +194,18 @@ export function sameEvent(a: object | null | undefined, b: object | null | undef
   return ka != null && ka === eventKey(b)
 }
 
+/**
+ * Имена, которые полезная нагрузка не имеет права занять.
+ *
+ * `t` и `type` — конверт, `session` приставляется при записи, `k` — keyPath
+ * стора событий, `_n`/`_lastT` — склейка. Поля склейки названы с подчёркиванием
+ * затем, что `n` в нагрузке занято; но `t`, `type` и `k` имена ходовые, и
+ * событие с полем `t` молча затирало бы время записи — то есть журнал
+ * сообщал бы неправду именно там, где его читают. Поэтому нагрузка
+ * обрезается, а не доспоривает с конвертом.
+ */
+const RESERVED = new Set(['t', 'type', 'k', 'session', '_n', '_lastT'])
+
 /** Запись в очереди: конверт плюс поля склейки. */
 type Queued = { t: number; type: string; _n?: number; _lastT?: number } & Record<string, unknown>
 
@@ -284,6 +307,8 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
   let queuedBytes = 0
   let lastT = 0
   let timer: ReturnType<typeof setTimeout> | null = null
+  /** Назначенный сброс — срочный (по порогу очереди), а не обычный по таймеру. */
+  let urgent = false
   let broken = false
   let dbPromise: Promise<IDBDatabase> | null = null
 
@@ -294,13 +319,24 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
   function cancelTimer(): void {
     if (timer !== null) clearTimeout(timer)
     timer = null
+    urgent = false
   }
 
-  function scheduleFlush(): void {
-    if (timer !== null) return
+  /**
+   * Назначает сброс. Уже назначенный переставляется только на более ранний
+   * срок: порог очереди обязан уметь поторопить таймер, а обычное событие —
+   * не обязано отодвигать уже назначенный срочный сброс.
+   */
+  function armFlush(ms: number): void {
+    if (timer !== null) {
+      if (ms !== 0 || urgent) return
+      clearTimeout(timer)
+      timer = null
+    }
+    urgent = ms === 0
     timer = setTimeout(() => {
       void flush()
-    }, LIMITS.flushMs)
+    }, ms)
     // В node таймер не должен держать прогон тестов живым.
     ;(timer as unknown as { unref?: () => void }).unref?.()
   }
@@ -308,22 +344,75 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
   function open(): Promise<IDBDatabase> {
     if (dbPromise) return dbPromise
     dbPromise = new Promise((resolve, reject) => {
-      if (!deps.idb) {
-        reject(new Error('IndexedDB недоступна'))
-        return
+      /* Отказ ОТКРЫТИЯ — это и есть «база непригодна»: приватный режим,
+         исчерпанная квота, запрет хранения. Только здесь и при обрыве
+         readwrite-транзакции (см. `rw`) поднимается `broken`; отказ отдельной
+         операции чтения журнал не выключает, иначе взгляд на диагностику
+         выключал бы диагностику. */
+      const fail = (err: unknown): void => {
+        broken = true
+        reject(err)
       }
-      const req = deps.idb.open(deps.dbName, DB_VERSION)
-      req.onupgradeneeded = () => {
-        const db = req.result
-        if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' })
-        if (!db.objectStoreNames.contains('events')) {
-          db.createObjectStore('events', { keyPath: 'k', autoIncrement: true }).createIndex('session', 'session')
+      try {
+        if (!deps.idb) {
+          fail(new Error('IndexedDB недоступна'))
+          return
         }
+        const req = deps.idb.open(deps.dbName, DB_VERSION)
+        req.onupgradeneeded = () => {
+          const db = req.result
+          if (!db.objectStoreNames.contains('sessions')) db.createObjectStore('sessions', { keyPath: 'id' })
+          if (!db.objectStoreNames.contains('events')) {
+            db.createObjectStore('events', { keyPath: 'k', autoIncrement: true }).createIndex('session', 'session')
+          }
+        }
+        req.onsuccess = () => resolve(req.result)
+        req.onerror = () => fail(req.error)
+      } catch (err) {
+        // На некоторых сборках `open()` бросает прямо, не отвечая запросом с ошибкой.
+        fail(err)
       }
-      req.onsuccess = () => resolve(req.result)
-      req.onerror = () => reject(req.error)
     })
     return dbPromise
+  }
+
+  /**
+   * Readwrite-транзакция с наблюдателем за обрывом.
+   *
+   * Обрыв транзакции записи — второе (и последнее) доказательство того, что
+   * база непригодна: записать не удалось. Наблюдатель ставится при создании, а
+   * не при ожидании завершения, иначе отказ, случившийся до `done(tx)`, остался
+   * бы незамеченным.
+   */
+  function rw(db: IDBDatabase, stores: string[]): IDBTransaction {
+    const tx = db.transaction(stores, 'readwrite')
+    tx.addEventListener('abort', () => {
+      broken = true
+    })
+    return tx
+  }
+
+  /** Записей в очереди с учётом склейки: залипшее событие — это `_n`, а не одна. */
+  function pending(): number {
+    let n = 0
+    for (const e of queue) n += e._n ?? 1
+    return n
+  }
+
+  /**
+   * Конверт записи: `t` и `type` впереди, за ними поля данных.
+   *
+   * Нагрузка кладётся ПОСЛЕ конверта по имени, а не разворотом поверх него:
+   * иначе событие с полем `type` или `t` подменило бы конверт собой.
+   */
+  function envelope(t: number, type: string, data?: object): Queued {
+    const e: Record<string, unknown> = { t, type }
+    if (data) {
+      for (const k in data) {
+        if (!RESERVED.has(k)) e[k] = (data as Record<string, unknown>)[k]
+      }
+    }
+    return e as Queued
   }
 
   /** Ставит событие в очередь. Никогда не бросает: журнал не роняет игру. */
@@ -331,7 +420,7 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
     if (broken) return
     const t = Math.max(lastT, Math.round(deps.now() - t0))
     lastT = t
-    const e = { t, type, ...data } as Queued
+    const e = envelope(t, type, data)
 
     /* Повтор подряд — не новая запись, а счётчик у прошлой. Склейка живёт
        здесь, в общем месте, а не у вызывающих: непредвиденный поток событий —
@@ -351,8 +440,15 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
 
     queue.push(e)
     prevKey = key
-    queuedBytes += bytesOf(e)
-    scheduleFlush()
+    /* Байты считаются по уже готовому отпечатку, а не второй сериализацией:
+       худшая запись — всплеск строк скелета, 45 x 132 числа, около 40 КБ JSON,
+       и приходит она ровно в тот момент (провал раунда, пауза), длительность
+       которого журнал и заведён измерять. Отпечаток не содержит `t`, `_n` и
+       `_lastT`, то есть счёт идёт с недостачей в десяток байт на запись —
+       оценка и так ниже занятого места на диске (docs/log-and-storage.md). */
+    queuedBytes += key?.length ?? 0
+    // Очередь переросла порог — сброс не ждёт двух секунд, но и не пишет здесь.
+    armFlush(queuedBytes >= LIMITS.queueBytes ? 0 : LIMITS.flushMs)
   }
 
   async function flush(): Promise<void> {
@@ -367,7 +463,7 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
     try {
       const db = await open()
       const bytes = bytesOf(batch)
-      const tx = db.transaction(['events', 'sessions'], 'readwrite')
+      const tx = rw(db, ['events', 'sessions'])
       const events = tx.objectStore('events')
       for (const e of batch) events.add({ ...e, session: sessionId })
 
@@ -384,8 +480,11 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
       await done(tx)
       await trimUnsafe()
     } catch {
-      // База не открылась — журнал молча выключается. Игра важнее журнала.
-      broken = true
+      /* Записать не удалось. `broken` здесь не ставится руками: его поднимает
+         отказ `open()` или обрыв readwrite-транзакции — то есть ровно
+         непригодность базы. Отказ одной операции (скажем, `DataError` на
+         чтении счётчиков сессии) стоит партии записей, но не журнала: иначе
+         один сбой выключал бы диагностику до конца сессии молча. */
     }
   }
 
@@ -399,7 +498,7 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
    */
   async function trimUnsafe(): Promise<number> {
     const db = await open()
-    const tx = db.transaction(['sessions', 'events'], 'readwrite')
+    const tx = rw(db, ['sessions', 'events'])
     const sessions = tx.objectStore('sessions')
     const all = ((await ask(sessions.getAll())) as { id: number; bytes?: number }[]).sort((a, b) => a.id - b.id)
 
@@ -430,24 +529,43 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
     try {
       return await trimUnsafe()
     } catch {
-      broken = true
+      // Чистка не удалась — потолок подождёт следующего сброса. Запись цела.
       return 0
     }
   }
 
+  /**
+   * Сводка для служебного экрана.
+   *
+   * Экран этот родитель открывает именно тогда, когда что-то не так, поэтому
+   * отказ ЧТЕНИЯ здесь не поднимает `broken`: иначе один взгляд на диагностику
+   * выключал бы запись до конца сессии. Не прочитав базу, отдаём то, что знаем
+   * наверняка — очередь в памяти, — и `broken` как он есть.
+   */
   async function status(): Promise<Status> {
-    const dead: Status = { broken: true, sessions: 0, events: 0, bytes: 0, share: 0, from: null, to: null }
-    if (broken) return dead
+    const unread = (): Status => ({
+      broken,
+      sessions: 0,
+      events: pending(),
+      bytes: queuedBytes,
+      share: queuedBytes / LIMITS.bytes,
+      from: null,
+      to: null,
+    })
+    if (broken) return unread()
     try {
       const db = await open()
       const all = (await ask(
         db.transaction('sessions').objectStore('sessions').getAll(),
       )) as { bytes?: number; events?: number; startedAt?: string }[]
       const bytes = all.reduce((s, x) => s + (x.bytes ?? 0), 0) + queuedBytes
-      const events = all.reduce((s, x) => s + (x.events ?? 0), 0) + queue.length
+      // Склеенная запись в очереди — это `_n` событий, а не одно: залипшее
+      // событие иначе показалось бы родителю единственным.
+      const events = all.reduce((s, x) => s + (x.events ?? 0), 0) + pending()
       const dates = all.map((s) => s.startedAt ?? '').sort()
       return {
-        broken: false,
+        // Не `false` литералом: сброс рядом мог оборваться, пока мы читали.
+        broken,
         sessions: all.length,
         events,
         bytes,
@@ -456,8 +574,7 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
         to: dates[dates.length - 1] ?? null,
       }
     } catch {
-      broken = true
-      return dead
+      return unread()
     }
   }
 
@@ -467,25 +584,39 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
     sessions: (Record<string, unknown> & { log: Record<string, unknown>[] })[]
   }
 
+  /**
+   * Собирает дамп ПО СЕССИЯМ, а не одним `getAll()` по всем событиям.
+   *
+   * Потолок базы — 25 МБ, и один `getAll()` над стором событий просил бы у
+   * телефона ребёнка все 25 МБ одной аллокацией. По сессии за раз запрос
+   * ограничен одной сессией, а не базой, — а именно отказ этой аллокации и
+   * был бы тем отказом, после которого журнал раньше замолкал совсем.
+   */
   async function collect(): Promise<Dump> {
     await flush()
     const db = await open()
-    const tx = db.transaction(['sessions', 'events'])
-    const sessions = ((await ask(tx.objectStore('sessions').getAll())) as { id: number }[]).sort(
-      (a, b) => a.id - b.id,
-    )
-    const events = (await ask(tx.objectStore('events').getAll())) as { k: number; session: number }[]
-    const bySession = new Map(sessions.map((s) => [s.id, { ...s, log: [] as Record<string, unknown>[] }]))
-    for (const e of events.sort((a, b) => a.k - b.k)) {
-      const { k: _k, session, ...rest } = e as Record<string, unknown> & { k: number; session: number }
-      void _k
-      bySession.get(session)?.log.push(rest)
+    const sessions = (
+      (await ask(db.transaction('sessions').objectStore('sessions').getAll())) as { id: number }[]
+    ).sort((a, b) => a.id - b.id)
+
+    const out: Dump['sessions'] = []
+    for (const s of sessions) {
+      // Своя транзакция на сессию: транзакция чтения живёт ровно пока у неё
+      // есть незакрытые запросы, а между сессиями мы ждём разбора.
+      const rows = (await ask(
+        db.transaction('events').objectStore('events').index('session').getAll(IDBKeyRange.only(s.id)),
+      )) as { k: number; session: number }[]
+      const log = rows
+        .sort((a, b) => a.k - b.k)
+        .map((e) => {
+          const { k: _k, session: _s, ...rest } = e as Record<string, unknown> & { k: number; session: number }
+          void _k
+          void _s
+          return rest
+        })
+      out.push({ ...s, log })
     }
-    return {
-      exportedAt: new Date(deps.wall()).toISOString(),
-      limits: LIMITS,
-      sessions: [...bySession.values()],
-    }
+    return { exportedAt: new Date(deps.wall()).toISOString(), limits: LIMITS, sessions: out }
   }
 
   /**
@@ -499,13 +630,18 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
    * зависит от версии и настроек.
    */
   async function save(): Promise<SaveResult> {
-    const empty: SaveResult = { name: '', bytes: 0, saved: false, shared: 'unavailable', sessions: 0, broken: true }
     let data: Dump
     try {
       data = await collect()
     } catch {
-      broken = true
-      return empty
+      /* Дамп не собрался. Запись при этом НЕ выключается: `collect()` — чтение,
+         а не доказательство непригодности базы. Иначе одно неудавшееся нажатие
+         «СОХРАНИТЬ И ПОДЕЛИТЬСЯ» лишало бы журнала весь остаток сессии —
+         молча, потому что сломалось бы ровно то, что об этом сообщает.
+
+         `broken` в ответе — состояние ЖУРНАЛА, а не исход выгрузки: за исход
+         отвечают `saved` и `shared`. */
+      return { name: '', bytes: 0, saved: false, shared: 'unavailable', sessions: 0, broken }
     }
 
     const stamp = new Date(deps.wall()).toISOString().slice(0, 19).replace(/[:T]/g, '-')
@@ -565,7 +701,7 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
     if (broken) return nothing
     try {
       const db = await open()
-      const tx = db.transaction(['sessions', 'events'], 'readwrite')
+      const tx = rw(db, ['sessions', 'events'])
       const sessions = tx.objectStore('sessions')
       const store = tx.objectStore('events')
       const index = store.index('session')
@@ -593,7 +729,8 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
       await done(tx)
       return { sessions: doomed.length, marked, bytes }
     } catch {
-      broken = true
+      // Уборка не удалась — ничего не помечено и не удалено, что и сказано
+      // нулями. Запись не выключаем: уборка не доказывает непригодность базы.
       return nothing
     }
   }
@@ -608,12 +745,12 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
     if (broken) return
     try {
       const db = await open()
-      const tx = db.transaction(['sessions', 'events'], 'readwrite')
+      const tx = rw(db, ['sessions', 'events'])
       tx.objectStore('sessions').clear()
       tx.objectStore('events').clear()
       await done(tx)
     } catch {
-      broken = true
+      // Опустошить не удалось. Очередь и кольцо уже чисты, запись цела.
     }
   }
 
