@@ -60,6 +60,9 @@ function checkFrames(frames: Frame[], pst: PresenceState, expect: Orientation): 
 const HZ = 12
 const PERIOD = 1000 / HZ
 
+/** Для тестов, которым самомаркировка не предмет проверки. */
+const noMark = (): void => {}
+
 beforeEach(() => {
   vi.useFakeTimers()
 })
@@ -70,7 +73,7 @@ afterEach(() => {
 
 describe('шесть сценариев из темы', () => {
   test('сценарий hit даёт кадры, на которых judgeWindow выносит hit', async () => {
-    const frames = await collect(fakeSource('hit', HZ), 8, PERIOD)
+    const frames = await collect(fakeSource('hit', HZ, noMark), 8, PERIOD)
     const checked = checkFrames(frames, newPresenceState(), STAR.orientation)
     const verdict = judgeWindow({
       spec: STAR,
@@ -85,7 +88,7 @@ describe('шесть сценариев из темы', () => {
   })
 
   test('сценарий miss-one-axis роняет ровно одну ось', async () => {
-    const frames = await collect(fakeSource('miss-one-axis', HZ), 8, PERIOD)
+    const frames = await collect(fakeSource('miss-one-axis', HZ, noMark), 8, PERIOD)
     const checked = checkFrames(frames, newPresenceState(), STAR.orientation)
     const verdict = judgeWindow({
       spec: STAR,
@@ -108,13 +111,13 @@ describe('шесть сценариев из темы', () => {
   })
 
   test('still — непрерывное присутствие, без ложных скачков', async () => {
-    const frames = await collect(fakeSource('still', HZ), 10, PERIOD)
+    const frames = await collect(fakeSource('still', HZ, noMark), 10, PERIOD)
     const checked = checkFrames(frames, newPresenceState(), 'front')
     expect(checked.every((f) => f.ok)).toBe(true)
   })
 
   test('leave-frame даёт кадры, дающие presence why none/lowvis', async () => {
-    const frames = await collect(fakeSource('leave-frame', HZ), 8, PERIOD)
+    const frames = await collect(fakeSource('leave-frame', HZ, noMark), 8, PERIOD)
     const checked = checkFrames(frames, newPresenceState(), 'front')
     const before = checked.slice(0, 5)
     const after = checked.slice(5)
@@ -126,7 +129,7 @@ describe('шесть сценариев из темы', () => {
   })
 
   test('turn-profile даёт presence why orientation для раунда с фронтом', async () => {
-    const frames = await collect(fakeSource('turn-profile', HZ), 8, PERIOD)
+    const frames = await collect(fakeSource('turn-profile', HZ, noMark), 8, PERIOD)
     const checked = checkFrames(frames, newPresenceState(), 'front')
     const before = checked.slice(0, 5)
     const after = checked.slice(5)
@@ -138,7 +141,7 @@ describe('шесть сценариев из темы', () => {
   })
 
   test('subject-swap даёт jump', async () => {
-    const frames = await collect(fakeSource('subject-swap', HZ), 8, PERIOD)
+    const frames = await collect(fakeSource('subject-swap', HZ, noMark), 8, PERIOD)
     const checked = checkFrames(frames, newPresenceState(), 'front')
     const before = checked.slice(0, 5)
     const after = checked.slice(5)
@@ -151,7 +154,7 @@ describe('шесть сценариев из темы', () => {
 })
 
 test('частота кадров соответствует заданной: пауза между кадрами равна 1000/hz', async () => {
-  const src = fakeSource('still', HZ)
+  const src = fakeSource('still', HZ, noMark)
   const it = src[Symbol.asyncIterator]()
 
   const first = await it.next()
@@ -175,7 +178,7 @@ test('частота кадров соответствует заданной: �
 test('частота держится и на других значениях hz', async () => {
   const hz = 11
   const period = 1000 / hz
-  const frames = await collect(fakeSource('still', hz), 5, period)
+  const frames = await collect(fakeSource('still', hz, noMark), 5, period)
   for (let i = 1; i < frames.length; i += 1) {
     expect(frames[i].t - frames[i - 1].t).toBeCloseTo(period, 6)
   }
@@ -183,26 +186,48 @@ test('частота держится и на других значениях hz
 
 describe('самомаркировка в журнале', () => {
   test('marker называет источник и сценарий синтетическими до единого выданного кадра', () => {
-    const src = fakeSource('hit', HZ)
-    expect(src.marker).toEqual({ type: 'fake.source', data: { script: 'hit', hz: HZ } })
+    const onMark = vi.fn()
+    fakeSource('hit', HZ, onMark)
+    expect(onMark).toHaveBeenCalledWith({ type: 'fake.source', data: { script: 'hit', hz: HZ } })
   })
 
   test('marker есть у каждого сценария и несёт ровно его имя', () => {
     for (const script of SCRIPTS) {
-      expect(fakeSource(script, HZ).marker.data.script).toBe(script)
+      const onMark = vi.fn()
+      fakeSource(script, HZ, onMark)
+      expect(onMark.mock.calls[0]?.[0].data.script).toBe(script)
     }
+  })
+
+  test('onMark обязателен: источник без него не создать', () => {
+    // @ts-expect-error — onMark обязателен в рантайме и в типах.
+    expect(() => fakeSource('hit', HZ)).toThrow(/onMark/)
+  })
+
+  test('onMark вызывается при создании источника ровно один раз со script и hz', () => {
+    const onMark = vi.fn()
+    fakeSource('hit', HZ, onMark)
+    expect(onMark).toHaveBeenCalledTimes(1)
+    expect(onMark).toHaveBeenCalledWith({ type: 'fake.source', data: { script: 'hit', hz: HZ } })
+  })
+
+  test('источник, созданный и ни разу не прочитанный, всё равно помечен', () => {
+    const onMark = vi.fn()
+    // Источник создан, но из него не взято ни одного кадра (ни .next(), ни for await).
+    fakeSource('still', HZ, onMark)
+    expect(onMark).toHaveBeenCalledTimes(1)
   })
 })
 
 describe('отказы формы', () => {
   test('неизвестный сценарий падает громко', () => {
-    expect(() => fakeSource('nope' as FakeScript, HZ)).toThrow(/сценари/)
+    expect(() => fakeSource('nope' as FakeScript, HZ, noMark)).toThrow(/сценари/)
   })
 
   test('негодный hz падает громко', () => {
-    expect(() => fakeSource('still', 0)).toThrow(/hz/)
-    expect(() => fakeSource('still', -1)).toThrow(/hz/)
-    expect(() => fakeSource('still', NaN)).toThrow(/hz/)
+    expect(() => fakeSource('still', 0, noMark)).toThrow(/hz/)
+    expect(() => fakeSource('still', -1, noMark)).toThrow(/hz/)
+    expect(() => fakeSource('still', NaN, noMark)).toThrow(/hz/)
   })
 
   test('SCRIPTS перечисляет ровно шесть сценариев темы', () => {

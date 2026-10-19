@@ -13,18 +13,22 @@ import { stick, type StickDesc } from './stick'
  * `geometry()` → `presence()` → `judgeWindow()`, а не фактом выдачи кадров —
  * см. `tests/fake/player.test.ts`.
  *
- * **Самомаркировка.** Источник подключается только динамическим импортом на
- * localhost или явным параметром (дело оболочки, задача 19 — этот файл сам по
- * себе ничего не решает про загрузку). Но ни один замер с него не имеет права
- * быть принят за настоящий (иначе калибровка порогов задачи 23 считает по
- * синтетике), поэтому `fakeSource()` возвращает не голый `AsyncIterable`, а
- * объект с ДОПОЛНИТЕЛЬНЫМ свойством `marker` — готовая запись журнала
- * `{ type: 'fake.source', data: { script, hz } }`. Она не пишется сюда сама:
- * `fakeSource()` не знает журнала и не обязан его знать (сигнатура
- * `(script, hz) → AsyncIterable<Frame>` остаётся ровно той, что задана
- * интерфейсом задачи), — но её нельзя не получить вместе с кадрами: журнал
- * пишет её оболочка (`journal.write(source.marker)`) ДО начала забега, и это
- * ровно тот факт, по которому потом видно в дампе, что сессия синтетическая.
+ * **Самомаркировка обязательна.** Источник подключается только динамическим
+ * импортом на localhost или явным параметром (дело оболочки, задача 19 —
+ * этот файл сам по себе ничего не решает про загрузку). Но ни один замер с
+ * него не имеет права быть принят за настоящий: журнал — единственный вход
+ * калибровки порогов задачи 23, и если задача 19 забудет пометить сессию,
+ * синтетические числа сидят в журнале неотличимо от живых — калибровка на
+ * них хуже отсутствия калибровки, потому что выглядит доказательством.
+ *
+ * Поэтому `onMark` — ТРЕТИЙ ОБЯЗАТЕЛЬНЫЙ параметр `fakeSource`, а не опция:
+ * вызов без него не компилируется и бросает в рантайме. Источник зовёт его
+ * РОВНО ОДИН РАЗ, СИНХРОННО, В МОМЕНТ СОЗДАНИЯ — до первого `.next()` и даже
+ * если ни одного кадра так и не будет взято. Так источник не может
+ * существовать, не объявив себя. `fakeSource()` при этом не знает журнала —
+ * берёт колбэк, а не адаптер (`src/adapters/log/*`), поэтому не тянет в этот
+ * файл зависимость, которой по брифу здесь нет; куда идёт пометка, решает
+ * вызывающий (обычно — `journal.write`, задача 19).
  */
 
 const ASPECT = 16 / 9
@@ -63,7 +67,10 @@ export type FakeScript = (typeof SCRIPTS)[number]
 /** Готовая запись журнала, которой источник отличает себя от настоящей камеры. */
 export type FakeMarker = { type: 'fake.source'; data: { script: FakeScript; hz: number } }
 
-export type FakeSource = AsyncIterable<Frame> & { readonly marker: FakeMarker }
+/** Получает самомаркировку — единожды, при создании источника. */
+export type OnMark = (marker: FakeMarker) => void
+
+export type FakeSource = AsyncIterable<Frame>
 
 /**
  * Скелет кадра номер `i` для данного сценария, либо `null` — трекер «потерял»
@@ -107,14 +114,24 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * РЕАЛЬНОГО времени: частота проверяется тестом именно по этой паузе, а не
  * только по отметке `t` внутри кадра (`t` растёт той же величиной, чтобы
  * окно судейства 600 мс держало ожидаемые 7±1 кадра на 11–12 Гц).
+ *
+ * `onMark` — обязателен, не опция: без него вызов не компилируется (TS) и
+ * бросает (JS/рантайм, если тип обойдён). Вызывается синхронно здесь же, до
+ * возврата объекта и до единого кадра — источник не может быть создан, не
+ * объявив себя синтетическим.
  */
-export function fakeSource(script: FakeScript, hz: number): FakeSource {
+export function fakeSource(script: FakeScript, hz: number, onMark: OnMark): FakeSource {
   if (!SCRIPTS.includes(script)) {
     throw new Error(`fakeSource: нет сценария «${String(script)}», есть: ${SCRIPTS.join(', ')}`)
   }
   if (!Number.isFinite(hz) || hz <= 0) {
     throw new Error('fakeSource: hz обязан быть положительным числом')
   }
+  if (typeof onMark !== 'function') {
+    throw new Error('fakeSource: onMark обязателен — источник обязан объявить себя синтетическим')
+  }
+
+  onMark({ type: 'fake.source', data: { script, hz } })
 
   const periodMs = 1000 / hz
 
@@ -130,8 +147,5 @@ export function fakeSource(script: FakeScript, hz: number): FakeSource {
     }
   }
 
-  return {
-    marker: { type: 'fake.source', data: { script, hz } },
-    [Symbol.asyncIterator]: gen,
-  }
+  return { [Symbol.asyncIterator]: gen }
 }
