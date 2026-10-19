@@ -80,10 +80,26 @@ type _AxesHaveNoExtra = AssertNever<Exclude<Axis, keyof AxisRequirements>>
  * `measured` — не украшение: оно уходит в журнал полем `perAxis`, и по нему
  * взрослый читает «левое плечо 58° при цели 90±30», не переигрывая раунд с
  * ребёнком. Единицы — свои у каждой оси (градусы либо доли торса `S`), и
- * значение считается даже тогда, когда состояние — «не знаю». `NaN` значит
- * «на этом кадре оси нет» (ближняя и дальняя сторона во фронтальном кадре).
+ * значение считается даже тогда, когда состояние — «не знаю». `NaN` значит, что
+ * мерить было нечем: оси на этом кадре нет (ближняя и дальняя сторона во
+ * фронтальном кадре) либо ни одной годной точки не нашлось (ноги, у которых не
+ * видно ни стоп, ни колен).
  */
-export type AxisReading<T> = { state: AxisValue<T>; measured: number }
+export type AxisReading<T> = {
+  state: AxisValue<T>
+  measured: number
+  /**
+   * Чем измерено `measured`, если ось умеет мерить по-разному. Сейчас такая ось
+   * одна — ноги: по стопам, когда они видны, и по коленям, когда нет. Поле
+   * обязано дойти до `perAxis`: взрослый, читающий «ноги 2.0», иначе не
+   * отличит разнос стоп от разноса колен, а это разные числа. Там, где
+   * измерить не удалось вовсе, источника нет — и поля нет.
+   */
+  measuredBy?: MeasuredBy
+}
+
+/** Источник измерения оси ног. */
+export type MeasuredBy = 'ankle' | 'knee'
 
 export type AxisReadings = { [K in Axis]: AxisReading<AxisRequirements[K]> }
 
@@ -308,26 +324,76 @@ function handsAxis(c: Ctx): AxisReading<HandsState> {
   return reading<HandsState>('no', gap)
 }
 
-/** Разнос ног: горизонтальное расстояние между стопами в долях торса. */
-function legsAxis(c: Ctx): AxisReading<LegsState> {
-  const spread = Math.abs(c.p(LM.leftAnkle).x - c.p(LM.rightAnkle).x) / c.g.S
-  if (!c.seen(LM.leftAnkle, LM.rightAnkle)) return reading<LegsState>('unknown', spread)
+/** Полоса состояния, заданная границами «от» и «до». */
+const span = <T>(state: T, from: number, to: number, strict: number): Band<T> => ({
+  state,
+  ref: (from + to) / 2,
+  tol: ((to - from) / 2) * strict,
+})
 
-  const { together, shoulderMin, shoulderMax, wideMin, wideMax, max } = CONFIG.legs
-  const bands: Band<LegsState>[] = [
-    { state: 'together', ref: 0, tol: together * c.strict },
-    {
-      state: 'shoulder',
-      ref: (shoulderMin + shoulderMax) / 2,
-      tol: ((shoulderMax - shoulderMin) / 2) * c.strict,
-    },
-    { state: 'wide', ref: (wideMin + wideMax) / 2, tol: ((wideMax - wideMin) / 2) * c.strict },
-  ]
-  const hit = pick(spread, bands, linear)
+/**
+ * Разнос ног: горизонтальное расстояние между СТОПАМИ, когда обе видны, и
+ * между КОЛЕНЯМИ, когда нет.
+ *
+ * Два источника — тот же урок, что у опоры: в приседе стопы уходят из кадра, и
+ * это норма, а не отказ. «Низкий барьер» и «Краб на пляже» требуют присед и
+ * ноги `wide` одновременно, так что по стопам они не засчитались бы никогда —
+ * ребёнок делал бы позу правильно и не получал ничего. Числа у двух источников
+ * свои (`CONFIG.legs.ankle` и `CONFIG.legs.knee`): при одной и той же стойке
+ * разносы разные, и один набор на двоих был бы двумя смыслами в одном числе.
+ *
+ * Чем измерено — в `measuredBy`: без этого «ноги 2.0» в журнале не прочесть.
+ * Не видно ни стоп, ни колен — «не знаю», и источника нет.
+ */
+function legsAxis(c: Ctx): AxisReading<LegsState> {
+  const gap = (a: number, b: number): number => Math.abs(c.p(a).x - c.p(b).x) / c.g.S
+
+  if (c.seen(LM.leftAnkle, LM.rightAnkle)) {
+    const { together, shoulderMin, shoulderMax, wideMin, wideMax, max } = CONFIG.legs.ankle
+    return byBands(
+      gap(LM.leftAnkle, LM.rightAnkle),
+      'ankle',
+      [
+        // Стопы вместе — полоса от нуля: сойтись теснее некуда.
+        { state: 'together' as const, ref: 0, tol: together * c.strict },
+        span('shoulder' as const, shoulderMin, shoulderMax, c.strict),
+        span('wide' as const, wideMin, wideMax, c.strict),
+      ],
+      max,
+    )
+  }
+
+  if (c.seen(LM.leftKnee, LM.rightKnee)) {
+    const k = CONFIG.legs.knee
+    return byBands(
+      gap(LM.leftKnee, LM.rightKnee),
+      'knee',
+      [
+        // Снизу полоса закрыта: ниже `togetherMin` колени приседом не
+        // разведены, и стойку по ним не восстановить.
+        span('together' as const, k.togetherMin, k.togetherMax, c.strict),
+        span('shoulder' as const, k.shoulderMin, k.shoulderMax, c.strict),
+        span('wide' as const, k.wideMin, k.wideMax, c.strict),
+      ],
+      k.max,
+    )
+  }
+
+  return reading<LegsState>('unknown', Number.NaN)
+}
+
+/** Общая развязка обоих источников: полосы плюс открытый сверху `max`. */
+function byBands(
+  spread: number,
+  measuredBy: MeasuredBy,
+  bands: readonly Band<Exclude<LegsState, 'max'>>[],
+  max: number,
+): AxisReading<LegsState> {
+  const hit: AxisValue<LegsState> = pick(spread, bands, linear)
   // `max` открыт сверху: это не допуск вокруг цели, а порог-доказательство, и
   // строгость его не масштабирует.
-  if (spread >= max) return reading<LegsState>(hit === 'unknown' ? 'max' : 'unknown', spread)
-  return reading(hit, spread)
+  const state: AxisValue<LegsState> = spread >= max ? (hit === 'unknown' ? 'max' : 'unknown') : hit
+  return { state, measured: spread, measuredBy }
 }
 
 /**

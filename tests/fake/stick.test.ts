@@ -74,7 +74,7 @@ test('по умолчанию — стоять прямо, руки вниз, н
   const g = geometry(lm, ASPECT)!
   expect(limbAngle(at(LM.leftShoulder), at(LM.leftElbow), 1)).toBeCloseTo(180, 6)
   expect(jointAngle(at(LM.leftShoulder), at(LM.leftElbow), at(LM.leftWrist))).toBeCloseTo(180, 6)
-  expect(Math.abs(at(LM.leftAnkle).x - at(LM.rightAnkle).x)).toBeLessThan(CONFIG.legs.together)
+  expect(Math.abs(at(LM.leftAnkle).x - at(LM.rightAnkle).x)).toBeLessThan(CONFIG.legs.ankle.together)
   expect(limbAngle(g.hipMid, g.shoulderMid, 1)).toBeCloseTo(0, 6)
 })
 
@@ -160,12 +160,12 @@ describe('состояния осей попадают в полосы CONFIG, �
       const at = reader(stick({ legs }))
       return Math.abs(at(LM.leftAnkle).x - at(LM.rightAnkle).x)
     }
-    expect(spread('together')).toBeLessThan(CONFIG.legs.together)
-    expect(spread('shoulder')).toBeGreaterThan(CONFIG.legs.shoulderMin)
-    expect(spread('shoulder')).toBeLessThan(CONFIG.legs.shoulderMax)
-    expect(spread('wide')).toBeGreaterThan(CONFIG.legs.wideMin)
-    expect(spread('wide')).toBeLessThan(CONFIG.legs.wideMax)
-    expect(spread('max')).toBeGreaterThan(CONFIG.legs.max)
+    expect(spread('together')).toBeLessThan(CONFIG.legs.ankle.together)
+    expect(spread('shoulder')).toBeGreaterThan(CONFIG.legs.ankle.shoulderMin)
+    expect(spread('shoulder')).toBeLessThan(CONFIG.legs.ankle.shoulderMax)
+    expect(spread('wide')).toBeGreaterThan(CONFIG.legs.ankle.wideMin)
+    expect(spread('wide')).toBeLessThan(CONFIG.legs.ankle.wideMax)
+    expect(spread('max')).toBeGreaterThan(CONFIG.legs.ankle.max)
   })
 
   test('опора на одной ноге — разница высот колен больше порога', () => {

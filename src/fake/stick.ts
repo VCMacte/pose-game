@@ -160,10 +160,10 @@ const LEAN_ANGLE: Record<LeanState, number> = {
   horizontal: CONFIG.lean.horizontal + 20,
 }
 const LEG_SPREAD: Record<LegsState, number> = {
-  together: CONFIG.legs.together / 2,
-  shoulder: (CONFIG.legs.shoulderMin + CONFIG.legs.shoulderMax) / 2,
-  wide: (CONFIG.legs.wideMin + CONFIG.legs.wideMax) / 2,
-  max: CONFIG.legs.max + 0.2,
+  together: CONFIG.legs.ankle.together / 2,
+  shoulder: (CONFIG.legs.ankle.shoulderMin + CONFIG.legs.ankle.shoulderMax) / 2,
+  wide: (CONFIG.legs.ankle.wideMin + CONFIG.legs.ankle.wideMax) / 2,
+  max: CONFIG.legs.ankle.max + 0.2,
 }
 /** Расстояние между кистями, когда они «вместе» — середина полосы CONFIG. */
 const HAND_GAP = Math.min(CONFIG.hands.overHead, CONFIG.hands.inFront) / 2

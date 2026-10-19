@@ -81,6 +81,12 @@ const BARRIER: Desc = {
   rightForearm: 'in',
   hands: 'in-front',
 }
+/**
+ * «Низкий барьер»: глубокий присед, ноги широко, стопы ушли из кадра. Ровно тот
+ * кадр, на котором ось ног обязана считаться по коленям: уход стоп в приседе —
+ * норма, а не отказ.
+ */
+const BARRIER_DEEP: Desc = { ...BARRIER, legs: 'wide', crouch: 'yes', visibilityOf: FEET_GONE }
 const FLAMINGO: Desc = { support: 'left', visibilityOf: FEET_GONE }
 const FOUR: Desc = { support: 'left', footAtKnee: true }
 const EGYPT: Desc = { orientation: 'profile', nearShoulder: 'up', farShoulder: 'down' }
@@ -192,6 +198,61 @@ describe('ноги и опора', () => {
     expect(read({ legs: 0.4 }).legs.state).toBe('unknown')
     expect(read({ legs: 0.8 }).legs.state).toBe('unknown')
     expect(read({ legs: 1.35 }).legs.state).toBe('unknown')
+  })
+
+  test('присед со стопами вне кадра судится по КОЛЕНЯМ, а не отказом', () => {
+    // «Низкий барьер» требует одновременно присед `yes` и ноги `wide`, а в
+    // приседе стопы уходят из кадра. Отказ по оси ног сорвал бы раунд не по
+    // вине ребёнка — худший класс дефекта в этой игре.
+    const r = read(BARRIER_DEEP)
+    expect(r.crouch.state).toBe('yes')
+    expect(r.legs.state).toBe('wide')
+    // Взрослый, читающий «ноги 2.0» в журнале, обязан знать, что это колени.
+    expect(r.legs.measuredBy).toBe('knee')
+    expect(r.legs.measured).toBeGreaterThan(CONFIG.legs.knee.wideMin)
+    expect(r.legs.measured).toBeLessThan(CONFIG.legs.knee.wideMax)
+  })
+
+  test('видимые стопы остаются главным источником', () => {
+    const r = read({ legs: 1.0 })
+    expect(r.legs.state).toBe('wide')
+    expect(r.legs.measuredBy).toBe('ankle')
+    expect(r.legs.measured).toBeCloseTo(1.0, 2)
+  })
+
+  test('по коленям те же четыре состояния', () => {
+    const byKnees = (spread: number): Desc => ({
+      legs: spread,
+      crouch: 'yes',
+      visibilityOf: FEET_GONE,
+    })
+    expect(read(byKnees(0.2)).legs.state).toBe('together')
+    expect(read(byKnees(0.6)).legs.state).toBe('shoulder')
+    expect(read(byKnees(1.075)).legs.state).toBe('wide')
+    expect(read(byKnees(1.6)).legs.state).toBe('max')
+    // Зазоры между полосами остаются зазорами и здесь.
+    expect(read(byKnees(0.4)).legs.state).toBe('unknown')
+    expect(read(byKnees(0.8)).legs.state).toBe('unknown')
+  })
+
+  test('прямые ноги со стопами вне кадра — «не знаю», а не «вместе»', () => {
+    // Полоса `together` по коленям закрыта снизу именно ради этого кадра:
+    // иначе широко стоящий ребёнок без стоп в кадре получил бы `together`, то
+    // есть промах не по своей вине.
+    const r = read({ legs: 'wide', visibilityOf: FEET_GONE })
+    expect(r.legs.state).toBe('unknown')
+    expect(r.legs.measuredBy).toBe('knee')
+    expect(r.legs.measured).toBeLessThan(CONFIG.legs.knee.togetherMin)
+  })
+
+  test('ни стоп, ни колен — ось «не знаю»', () => {
+    const r = read({
+      legs: 'wide',
+      crouch: 'yes',
+      visibilityOf: { ...FEET_GONE, leftKnee: 0, rightKnee: 0 },
+    })
+    expect(r.legs.state).toBe('unknown')
+    expect(r.legs.measuredBy).toBeUndefined()
   })
 
   test('опора считается по коленям, а не по стопам', () => {
@@ -387,6 +448,7 @@ test('каждая ось из AXES хоть где-то определена и
       BOXER,
       ROCKET,
       BARRIER,
+      BARRIER_DEEP,
       FLAMINGO,
       FOUR,
       EGYPT,

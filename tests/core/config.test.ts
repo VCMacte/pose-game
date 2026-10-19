@@ -3,8 +3,8 @@ import { CONFIG, strictness } from '../../src/core/config'
 
 test('CONFIG несёт все пороги из спека', () => {
   expect(CONFIG.shoulder.tolerance).toBe(30)
-  expect(CONFIG.legs.together).toBe(0.35)
-  expect(CONFIG.legs.max).toBe(1.4)
+  expect(CONFIG.legs.ankle.together).toBe(0.35)
+  expect(CONFIG.legs.ankle.max).toBe(1.4)
   expect(CONFIG.judge.ratio).toBe(0.60)
   expect(CONFIG.judge.minValid).toBe(4)
   expect(CONFIG.judge.skipBelow).toBe(3)
