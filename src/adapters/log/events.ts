@@ -235,7 +235,23 @@ export const camEnded = (d: { why: 'ended' | 'mute' }): Of<'cam.ended', { why: '
   data: d,
 })
 
-export type PoseReadyData = { pipeline: string; delegate: 'GPU' | 'CPU'; warmupMs: number }
+/**
+ * Источник позы завёлся. `warmupMs` — МЕДИАНА десяти прогревочных инференсов
+ * по серому кадру, и это главное поле записи: заявленный делегат умеет врать,
+ * а медиана выше `POSE.warmupCpuMs` означает, что считает процессор, что бы
+ * ни было написано в `delegate`. Отсюда и `looksLikeCpu` — приговор по замеру,
+ * а не по ответу библиотеки. `null` у медианы значит «не замерили»; ноль был
+ * бы ложью («замерили и вышло 0 мс»).
+ */
+export type PoseReadyData = {
+  pipeline: string
+  delegate: 'GPU' | 'CPU'
+  warmupMs: number | null
+  initMs?: number | null
+  looksLikeCpu?: boolean | null
+  source?: string
+  script?: string
+}
 
 export const poseReady = (d: PoseReadyData): Of<'pose.ready', PoseReadyData> => ({ type: 'pose.ready', data: d })
 

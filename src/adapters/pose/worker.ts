@@ -79,6 +79,14 @@ export type FromWorker =
     }
   /** Признак жизни: молчащий воркер иначе неотличим от работающего без поз. */
   | { type: 'beat'; busyFrac: number; dropped: number; p50: number; p95: number }
+  /**
+   * Кадр отброшен (троттлингом или вытеснен свежим) и позы по нему не будет.
+   * Сообщение нужно не для статистики — она едет в `dropped` у `pose`, — а
+   * потому что конвейер `bitmap` держит поток управления ПО ПОДТВЕРЖДЕНИЮ: без
+   * этого отброшенный кадр означал бы вечное ожидание подтверждения, которое
+   * никогда не придёт, и конвейер встал бы навсегда при живом воркере.
+   */
+  | { type: 'drop' }
   | { type: 'stopped' }
 
 // ───────────────────────── окружение воркера ─────────────────────────
@@ -125,7 +133,7 @@ type FrameReadable = {
 
 let landmarker: Landmarker | null = null
 let clock: ((ms: number) => number) | null = null
-let hz = POSE.hz
+let hz: number = POSE.hz
 let timeOffset = 0
 let seq = 0
 
@@ -156,13 +164,17 @@ function release(frame: Frameish | null | undefined): void {
   }
 }
 
+/** Кадр не будет посчитан: освободить и сказать об этом вслух. */
+function drop(frame: Frameish): void {
+  release(frame)
+  dropped++
+  post({ type: 'drop' })
+}
+
 /** Новый кадр вытесняет непосчитанный старый: свежесть важнее полноты. */
 function offer(frame: Frameish | null | undefined): void {
   if (!frame) return
-  if (pending) {
-    release(pending)
-    dropped++
-  }
+  if (pending) drop(pending)
   pending = frame
   kick()
 }
@@ -177,8 +189,7 @@ function kick(): void {
   // задержку, растущую без предела: кадры приходят каждые 33 мс, инференс
   // занимает 80, и разница копится. Отброс даёт честную пониженную частоту.
   if (lastRun && performance.now() - lastRun < 1000 / hz) {
-    release(frame)
-    dropped++
+    drop(frame)
     return
   }
 

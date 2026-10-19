@@ -1,0 +1,670 @@
+/**
+ * Источник позы: единственное место, где решается, откуда берутся 33 точки.
+ *
+ * Шов для синтетики ровно один — ветка в `startPoseSource()`. Так сделано
+ * нарочно: тестовый путь не должен проникать в рабочий дальше одного условия,
+ * иначе проверяешь уже не то, что поедет на телефон.
+ *
+ * Камера и синтетический игрок приходят сюда ЗАВИСИМОСТЯМИ, а не импортом
+ * (`openCamera` из задачи 16, `fakeFrames` из задачи 14): оболочка знает, что
+ * из них подключать, а источник позы — как ими пользоваться. Попутно это
+ * оставляет MediaPipe за динамическим импортом: семнадцать мегабайт вендора не
+ * грузятся ради синтетического прогона.
+ *
+ * Диагностика у этого файла одна — журнал: телефон на штативе, консоли нет.
+ * Всё, что здесь не записано, не существует.
+ *
+ * Разбор: `docs/camera-and-pose.md`.
+ */
+
+import type { Frame } from '../../core/types'
+import { camEnded, camFail, poseFail, poseReady } from '../log/events'
+import { write } from '../log/store'
+import { POSE, landmarkerOptions, looksLikeCpu, makeClock, packLandmarks, warmup } from './pack'
+import type { Delegate, Landmarker } from './pack'
+import { PIPELINES, makeLadder, parsePipelineFlag, pipelineId } from './pipelines'
+import type { Pipeline } from './pipelines'
+import type { FromWorker, InitMsg } from './worker'
+
+/** Абсолютный адрес файла вендора: воркер не умеет разрешать относительные. */
+const at = (path: string): string =>
+  typeof document === 'undefined' ? path : new URL(path, document.baseURI).href
+
+/**
+ * Вендор лежит в `public/` и прекэшируется — игра обязана работать офлайн, а
+ * модель и wasm вместе весят семнадцать мегабайт.
+ * → `docs/offline-and-build.md`
+ */
+export const VENDOR = Object.freeze({
+  /**
+   * Каталог wasm для `FilesetResolver.forVisionTasks()`. Загрузчик сам
+   * достраивает имя: `vision_wasm_internal.js` при поддержке SIMD и
+   * `vision_wasm_nosimd_internal.js` без неё. Вариант без SIMD мы не кладём
+   * (ещё 10.5 МБ), поэтому поддержку спрашиваем предикатом самой библиотеки
+   * до запуска — см. `worker.ts`.
+   */
+  wasmBase: 'vendor/mediapipe/wasm',
+  /**
+   * Две сборки одной библиотеки, и обе нужны. Классическая (IIFE, кладёт
+   * глобаль `Vision`) — для воркера: он обязан быть классическим. Модульная —
+   * для пути `main`. Версия у них ОДНА: wasm и сборка должны быть из одного
+   * набора, иначе падение приходит изнутри wasm и на дефект кода не похоже.
+   */
+  bundleClassic: 'vendor/mediapipe/vision_bundle.js',
+  bundleModule: 'vendor/mediapipe/vision_bundle.mjs',
+  model: 'models/pose_landmarker_lite.task',
+} as const)
+
+// ───────────────────────── контракт ─────────────────────────
+
+/** Что известно про кадр сверх самих точек. */
+export type SampleMeta = {
+  seq: number
+  /** Когда кадр снят, шкала главного потока. По нему судят. */
+  tCap: number
+  /** Когда поза посчитана: разница с `tCap` и есть задержка распознавания. */
+  tDone: number
+  inferMs: number
+  /** Кадров отброшено троттлингом с прошлой позы. */
+  dropped: number
+  /**
+   * Размер ТОГО кадра, по которому считали, — единственное достоверное место,
+   * откуда берётся отношение сторон: `track.getSettings()` умеет врать.
+   */
+  w: number | null
+  h: number | null
+  pipeline: string | null
+}
+
+export type SourceStatus =
+  | {
+      kind: 'ready'
+      source: 'camera' | 'fake'
+      pipeline: string | null
+      delegate: Delegate | null
+      initMs: number | null
+      warmupMs: number | null
+      looksLikeCpu: boolean | null
+      /** Предпросмотр для рендера; у синтетики его нет. */
+      video: HTMLVideoElement | null
+      script?: string
+    }
+  /** Ступень лестницы сошла — следующая попытка уже идёт. */
+  | { kind: 'down'; pipeline: string; message: string }
+  /** Лестница кончилась: поз не будет, и об этом надо сказать вслух. */
+  | { kind: 'exhausted'; message: string }
+  | { kind: 'beat'; busyFrac: number; dropped: number; p50: number; p95: number }
+  | { kind: 'camera-lost'; why: 'ended' | 'mute' }
+
+/** Минимум, который источник позы требует от камеры (задача 16). */
+export type CameraHandle = {
+  stream: MediaStream
+  stop?: () => void
+}
+
+export type OpenCamera = () => Promise<CameraHandle>
+
+/** Кадры синтетического игрока (задача 14). */
+export type FakeFrames = (script: string, hz: number) => AsyncIterable<Frame>
+
+export type PoseSourceOpts = {
+  source: 'camera' | 'fake'
+  hz?: number
+  onSample(f: Frame, meta: SampleMeta): void
+  onStatus(s: SourceStatus): void
+  /** Принудительный конвейер: строка запроса или само значение `?pipeline=`. */
+  pipeline?: string | null
+  /** Сценарий синтетического игрока. */
+  script?: string
+  openCamera?: OpenCamera
+  fakeFrames?: FakeFrames
+}
+
+/** Остановить источник. Звать можно повторно — второй раз ничего не делает. */
+export type Stop = () => Promise<void>
+
+// ───────────────────────── вспомогательное ─────────────────────────
+
+/** Обещание с потолком ожидания: молчащая попытка не вправе держать игру. */
+function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what}: нет ответа за ${ms} мс`)), ms)
+    p.then(
+      (v) => {
+        clearTimeout(timer)
+        resolve(v)
+      },
+      (e) => {
+        clearTimeout(timer)
+        reject(e)
+      },
+    )
+  })
+}
+
+const says = (e: unknown): string => {
+  const x = e as { message?: string } | null
+  return String(x?.message ?? e)
+}
+
+/** `MediaStreamTrackProcessor` есть не везде — наличие проверяется, а не ждётся. */
+type FrameProcessorCtor = new (init: { track: MediaStreamTrack }) => { readable: unknown }
+
+const frameProcessor = (): FrameProcessorCtor | undefined =>
+  (globalThis as { MediaStreamTrackProcessor?: FrameProcessorCtor }).MediaStreamTrackProcessor
+
+// ───────────────────────── источник ─────────────────────────
+
+/**
+ * Запускает поток поз. `onSample` получает кадр ядра (`{ t, lm }`) и
+ * метаданные — одинаковые у камеры и у синтетики, чтобы оболочка не знала,
+ * откуда кадр приехал.
+ */
+export async function startPoseSource(opts: PoseSourceOpts): Promise<Stop> {
+  const hz = opts.hz ?? POSE.hz
+  if (opts.source === 'fake') return startFake(opts, hz)
+  return startCamera(opts, hz)
+}
+
+/**
+ * Синтетика. Ни воркера, ни лестницы: кадры уже посчитаны, и единственное, что
+ * здесь есть, — остановка посреди итерации.
+ */
+async function startFake(opts: PoseSourceOpts, hz: number): Promise<Stop> {
+  const script = opts.script ?? 'still'
+  const frames = opts.fakeFrames
+  if (!frames) {
+    const message = 'синтетический игрок не подключён'
+    write(poseFail({ pipeline: 'fake', message }))
+    opts.onStatus({ kind: 'exhausted', message })
+    return async () => {}
+  }
+
+  let stopped = false
+  let seq = 0
+
+  const pump = async (): Promise<void> => {
+    for await (const frame of frames(script, hz)) {
+      if (stopped) return
+      const t = frame.t
+      opts.onSample(frame, {
+        seq: seq++,
+        tCap: t,
+        tDone: t,
+        inferMs: 0,
+        dropped: 0,
+        w: null,
+        h: null,
+        pipeline: 'fake',
+      })
+    }
+  }
+
+  void pump().catch((e) => {
+    write(poseFail({ pipeline: 'fake', message: says(e) }))
+  })
+
+  write(poseReady({ pipeline: 'fake', delegate: 'CPU', warmupMs: null, source: 'fake', script }))
+  opts.onStatus({
+    kind: 'ready',
+    source: 'fake',
+    pipeline: 'fake',
+    delegate: null,
+    initMs: null,
+    warmupMs: null,
+    looksLikeCpu: null,
+    video: null,
+    script,
+  })
+
+  return async () => {
+    stopped = true
+  }
+}
+
+/** Одна открытая ступень лестницы. */
+type Attempt = {
+  pipeline: Pipeline
+  initMs: number | null
+  warmupMs: number | null
+  looksLikeCpu: boolean | null
+  delegate: Delegate
+  stop(): Promise<void>
+}
+
+async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
+  const open = opts.openCamera
+  if (!open) {
+    const message = 'камера не подключена к источнику позы'
+    write(poseFail({ pipeline: 'camera', message }))
+    opts.onStatus({ kind: 'exhausted', message })
+    return async () => {}
+  }
+
+  const cam = await open()
+  const track = cam.stream.getVideoTracks()[0] ?? null
+
+  /*
+   * Android отбирает камеру на входящем звонке, и приходит это не ошибкой, а
+   * событием дорожки. Молча это выглядит как «игра перестала видеть ребёнка».
+   */
+  const lost = (why: 'ended' | 'mute') => (): void => {
+    write(camEnded({ why }))
+    opts.onStatus({ kind: 'camera-lost', why })
+  }
+  const onEnded = lost('ended')
+  const onMute = lost('mute')
+  track?.addEventListener('ended', onEnded)
+  track?.addEventListener('mute', onMute)
+
+  const video = document.createElement('video')
+  video.playsInline = true
+  video.muted = true
+  video.srcObject = cam.stream
+
+  /*
+   * Отказ `play()` — отказ камеры, а не исключение наружу: наверху ждёт
+   * оболочка, которой нужен СТАТУС, а не брошенная ошибка. Бросить её значило
+   * бы вдобавок оставить открытую дорожку и слежение за ней висеть — то есть
+   * горящий индикатор камеры при игре, которая камеру не видит.
+   */
+  try {
+    await withTimeout(Promise.resolve(video.play()), 5000, 'video.play')
+  } catch (e) {
+    const err = e as { name?: string; message?: string }
+    write(camFail({ name: err?.name ?? 'Error', message: says(e) }))
+    track?.removeEventListener('ended', onEnded)
+    track?.removeEventListener('mute', onMute)
+    cam.stop?.()
+    for (const t of cam.stream.getTracks()) t.stop()
+    video.srcObject = null
+    opts.onStatus({ kind: 'exhausted', message: `видео не запустилось: ${says(e)}` })
+    return async () => {}
+  }
+
+  const forced = parsePipelineFlag(
+    opts.pipeline ?? (typeof location === 'undefined' ? null : location.search),
+  )
+  const ladder = makeLadder(forced ?? PIPELINES)
+
+  let stopped = false
+  let seq = 0
+  let active: Attempt | null = null
+  /** Переход по лестнице уже идёт: второй отказ не вправе начать второй. */
+  let switching = false
+
+  /**
+   * Имя конвейера приходит сюда аргументом, а не берётся из `active`: кадр,
+   * посчитанный гаснущей ступенью, успевает прийти уже после того, как
+   * `active` обнулён, и записался бы конвейером `null` — то есть журнал врал
+   * бы ровно в том месте, ради которого он и ведётся.
+   */
+  const emit = (
+    id: string,
+    lm: Float32Array | null,
+    meta: Omit<SampleMeta, 'seq' | 'pipeline'>,
+  ): void => {
+    if (stopped) return
+    opts.onSample({ t: meta.tCap, lm }, { ...meta, seq: seq++, pipeline: id })
+  }
+
+  /** Ступень сошла: журнал и статус — одной строкой, чтобы не разошлись. */
+  const down = (p: Pipeline, message: string): null => {
+    write(poseFail({ pipeline: pipelineId(p), message }))
+    opts.onStatus({ kind: 'down', pipeline: pipelineId(p), message })
+    return null
+  }
+
+  // ── лестница отказов ──
+  // Каждая сошедшая ступень пишется в журнал: иначе «почему-то медленно»
+  // невозможно отличить от «GPU не завёлся и всё считается на процессоре».
+  const climb = async (): Promise<void> => {
+    while (!stopped) {
+      const p = ladder.current()
+      if (!p) {
+        const message = 'лестница конвейеров исчерпана'
+        opts.onStatus({ kind: 'exhausted', message })
+        return
+      }
+
+      let attempt: Attempt | null = null
+      try {
+        attempt = p.mode === 'main' ? await startMain(p) : await startWorker(p)
+      } catch (e) {
+        attempt = down(p, says(e))
+      }
+
+      if (attempt) {
+        active = attempt
+        if (stopped) {
+          // Пока поднимались, игру успели остановить: ступень не бросаем.
+          await attempt.stop()
+          return
+        }
+        write(
+          poseReady({
+            pipeline: pipelineId(p),
+            delegate: attempt.delegate,
+            warmupMs: attempt.warmupMs,
+            initMs: attempt.initMs,
+            looksLikeCpu: attempt.looksLikeCpu,
+            source: 'camera',
+          }),
+        )
+        opts.onStatus({
+          kind: 'ready',
+          source: 'camera',
+          pipeline: pipelineId(p),
+          delegate: attempt.delegate,
+          initMs: attempt.initMs,
+          warmupMs: attempt.warmupMs,
+          looksLikeCpu: attempt.looksLikeCpu,
+          video,
+        })
+        return
+      }
+
+      if (ladder.onDown() === 'exhausted') {
+        const message = 'лестница конвейеров исчерпана'
+        opts.onStatus({ kind: 'exhausted', message })
+        return
+      }
+    }
+  }
+
+  /**
+   * Конвейер сошёл уже после `ready` — пять ошибок инференса подряд, конец
+   * потока кадров, смерть воркера. Текущая ступень гасится ЦЕЛИКОМ, и только
+   * потом поднимается следующая: два живых распознавателя на одном Adreno 619
+   * не ускорят ничего.
+   */
+  const fell = async (message: string): Promise<void> => {
+    if (stopped || switching) return
+    switching = true
+    const p = ladder.current()
+    if (p) down(p, message)
+    const dying = active
+    active = null
+    if (dying) await dying.stop()
+    const step = ladder.onDown()
+    switching = false
+    if (step === 'exhausted') {
+      opts.onStatus({ kind: 'exhausted', message: 'лестница конвейеров исчерпана' })
+      return
+    }
+    await climb()
+  }
+
+  /** Воркерные конвейеры: `stream` и `bitmap`. */
+  async function startWorker(p: Pipeline): Promise<Attempt | null> {
+    // Возможности браузера ПРОВЕРЯЮТСЯ, а не предполагаются, и пропущенная по
+    // их отсутствию ступень тоже пишется в журнал: иначе «почему-то сразу
+    // bitmap» не отличить от «stream пробовали и он упал».
+    if (typeof Worker === 'undefined') return down(p, 'нет Worker')
+    if (!track) return down(p, 'в потоке камеры нет видеодорожки')
+    if (p.mode === 'stream' && !frameProcessor()) return down(p, 'нет MediaStreamTrackProcessor')
+    if (p.mode === 'bitmap' && typeof createImageBitmap !== 'function') {
+      return down(p, 'нет createImageBitmap')
+    }
+
+    // Воркер КЛАССИЧЕСКИЙ, не модульный: MediaPipe выполняет свой
+    // wasm-загрузчик через `importScripts`, которого в модульном воркере нет,
+    // и падает с «ModuleFactory not set.».
+    const w = new Worker(new URL('./worker.ts', import.meta.url))
+
+    let frameTimer: ReturnType<typeof setTimeout> | null = null
+    let inFlight = false
+    let killed = false
+    /** Клон дорожки для `stream`: гаснет вместе со ступенью, иначе камера
+        остаётся занятой, а индикатор — горящим при мёртвом конвейере. */
+    let clone: MediaStreamTrack | null = null
+
+    const teardown = async (): Promise<void> => {
+      if (killed) return
+      killed = true
+      if (frameTimer !== null) clearTimeout(frameTimer)
+      w.onmessage = null
+      w.onerror = null
+      try {
+        w.postMessage({ type: 'stop' })
+      } catch {
+        // воркер уже мёртв — терминируем и идём дальше
+      }
+      w.terminate()
+      clone?.stop()
+      clone = null
+    }
+
+    const ready = new Promise<FromWorker>((resolve) => {
+      w.onmessage = (e: MessageEvent): void => {
+        const m = e.data as FromWorker
+        if (m.type === 'ready' || m.type === 'fail') {
+          resolve(m)
+          return
+        }
+      }
+      w.onerror = (e: ErrorEvent): void => {
+        resolve({ type: 'fail', stage: 'worker', message: String(e.message || e.type) })
+      }
+    })
+
+    const init: InitMsg = {
+      type: 'init',
+      mode: p.mode,
+      delegate: p.delegate,
+      hz,
+      mainTimeOrigin: performance.timeOrigin,
+      bundleUrl: at(VENDOR.bundleClassic),
+      wasmBase: at(VENDOR.wasmBase),
+      modelUrl: at(VENDOR.model),
+    }
+
+    if (p.mode === 'stream') {
+      const Processor = frameProcessor()!
+      /*
+       * Дорожка клонируется: оригинал остаётся на `<video>` для предпросмотра
+       * и для запасного пути, и вопрос «можно ли одной дорожкой кормить и то и
+       * другое» просто не возникает.
+       */
+      clone = track.clone()
+      const readable = new Processor({ track: clone }).readable
+      init.stream = readable
+      w.postMessage(init, [readable as Transferable])
+    } else {
+      w.postMessage(init)
+    }
+
+    let res: FromWorker
+    try {
+      res = await withTimeout(ready, POSE.initTimeoutMs, `init ${pipelineId(p)}`)
+    } catch (e) {
+      await teardown()
+      return down(p, says(e))
+    }
+
+    if (res.type !== 'ready') {
+      await teardown()
+      return down(p, res.type === 'fail' ? `${res.stage}: ${res.message}` : 'воркер не ответил ready')
+    }
+
+    // Рабочий обмен сообщениями: `ready` уже получен, дальше идут позы.
+    w.onmessage = (e: MessageEvent): void => {
+      const m = e.data as FromWorker
+      if (m.type === 'pose') {
+        inFlight = false
+        emit(pipelineId(p), m.lm, {
+          tCap: m.tCap,
+          tDone: m.tDone,
+          inferMs: m.inferMs,
+          dropped: m.dropped,
+          w: m.w,
+          h: m.h,
+        })
+        return
+      }
+      if (m.type === 'drop') {
+        // Позы по кадру не будет, но подтверждение пришло: иначе конвейер
+        // `bitmap` ждал бы его вечно и встал бы при живом воркере.
+        inFlight = false
+        return
+      }
+      if (m.type === 'beat') {
+        opts.onStatus({ kind: 'beat', busyFrac: m.busyFrac, dropped: m.dropped, p50: m.p50, p95: m.p95 })
+        return
+      }
+      if (m.type === 'pose.error') {
+        // Одна ошибка — ещё не отказ: в журнал, но лестницу не двигаем.
+        write(poseFail({ pipeline: pipelineId(p), message: `${m.stage}: ${m.message}` }))
+        return
+      }
+      if (m.type === 'fail') {
+        void fell(`${m.stage}: ${m.message}`)
+      }
+    }
+    w.onerror = (e: ErrorEvent): void => {
+      void fell(`worker: ${String(e.message || e.type)}`)
+    }
+
+    if (p.mode === 'bitmap') {
+      /*
+       * Поток управления — ПОДТВЕРЖДЕНИЕ от воркера: новый кадр снимается
+       * только после того, как предыдущий посчитан. Иначе главный поток копит
+       * битмапы быстрее, чем воркер их считает.
+       */
+      const grab = async (): Promise<void> => {
+        if (killed || stopped) return
+        if (!inFlight && video.videoWidth) {
+          inFlight = true
+          let bmp: ImageBitmap | null = null
+          try {
+            bmp = await createImageBitmap(video)
+          } catch {
+            inFlight = false
+          }
+          if (bmp) {
+            if (killed || stopped) {
+              // Кадр снят, но ступень уже гасится — закрыть обязаны мы.
+              bmp.close()
+              return
+            }
+            try {
+              w.postMessage({ type: 'frame', bitmap: bmp }, [bmp])
+            } catch {
+              bmp.close()
+              inFlight = false
+            }
+          }
+        }
+        if (killed || stopped) return
+        frameTimer = setTimeout(() => void grab(), 1000 / hz)
+      }
+      void grab()
+    }
+
+    return {
+      pipeline: p,
+      delegate: res.delegate,
+      initMs: res.initMs,
+      warmupMs: res.warmupMs,
+      looksLikeCpu: res.looksLikeCpu,
+      stop: teardown,
+    }
+  }
+
+  /**
+   * Последний запасной путь: инференс на главном потоке. ЦЕПОЧКОЙ ТАЙМАУТОВ,
+   * а не из `requestAnimationFrame` — синхронный блок внутри кадра превращает
+   * потерю одного кадра в потерю двух.
+   */
+  async function startMain(p: Pipeline): Promise<Attempt | null> {
+    const vision = (await import(/* @vite-ignore */ at(VENDOR.bundleModule))) as {
+      FilesetResolver: {
+        isSimdSupported(): Promise<boolean>
+        forVisionTasks(base: string): Promise<unknown>
+      }
+      PoseLandmarker: { createFromOptions(fileset: unknown, options: unknown): Promise<Landmarker> }
+    }
+
+    if (!(await vision.FilesetResolver.isSimdSupported())) {
+      throw new Error('устройство не поддерживает WASM SIMD')
+    }
+
+    const t0 = performance.now()
+    const fileset = await vision.FilesetResolver.forVisionTasks(at(VENDOR.wasmBase))
+    const landmarker = await vision.PoseLandmarker.createFromOptions(
+      fileset,
+      landmarkerOptions(at(VENDOR.model), p.delegate),
+    )
+    const initMs = Math.round(performance.now() - t0)
+
+    const clock = makeClock()
+    const warmupMs = warmup(landmarker, clock)
+
+    let timer: ReturnType<typeof setTimeout> | null = null
+    let killed = false
+    let errors = 0
+
+    const step = (): void => {
+      if (killed || stopped) return
+      const tCap = performance.now()
+      let lm: Float32Array | null = null
+      try {
+        lm = packLandmarks(landmarker.detectForVideo(video, clock(tCap)))
+        errors = 0
+      } catch (e) {
+        errors++
+        write(poseFail({ pipeline: pipelineId(p), message: `infer: ${says(e)}` }))
+      }
+      const tDone = performance.now()
+      emit(pipelineId(p), lm, {
+        tCap,
+        tDone,
+        inferMs: Math.round(tDone - tCap),
+        dropped: 0,
+        w: video.videoWidth || null,
+        h: video.videoHeight || null,
+      })
+      if (errors >= 5) {
+        // Ниже этой ступени лестницы нет, но сказать об этом обязаны.
+        errors = 0
+        void fell('пять ошибок инференса подряд на главном потоке')
+        return
+      }
+      timer = setTimeout(step, 1000 / POSE.hzMainThread)
+    }
+    step()
+
+    return {
+      pipeline: p,
+      delegate: p.delegate,
+      initMs,
+      warmupMs,
+      looksLikeCpu: looksLikeCpu(warmupMs),
+      stop: async () => {
+        if (killed) return
+        killed = true
+        if (timer !== null) clearTimeout(timer)
+        try {
+          landmarker.close()
+        } catch {
+          // закрыли уже — не беда
+        }
+      },
+    }
+  }
+
+  await climb()
+
+  return async () => {
+    if (stopped) return
+    stopped = true
+    track?.removeEventListener('ended', onEnded)
+    track?.removeEventListener('mute', onMute)
+    const dying = active
+    active = null
+    if (dying) await dying.stop()
+    cam.stop?.()
+    for (const t of cam.stream.getTracks()) t.stop()
+    video.srcObject = null
+  }
+}
