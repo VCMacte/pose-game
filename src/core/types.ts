@@ -75,7 +75,14 @@ export type PoseSpec = {
   tags: PoseTag[]
 }
 
-/** Снимок нейтральной стойки ребёнка, снятый в начале забега. */
+/**
+ * Снимок нейтральной стойки ребёнка, снятый в начале забега.
+ *
+ * `cameraId` опционален: он нужен только `isStale()` (src/core/calibration.ts)
+ * для одного из трёх поводов устаревания — смены камеры. Существующие места,
+ * собирающие `Calibration` вручную (тесты других модулей), его не знают и не
+ * обязаны знать — обязательным его делать нельзя, не задев их.
+ */
 export type Calibration = {
   S0: number
   shoulderWidth: number
@@ -84,6 +91,7 @@ export type Calibration = {
   neutralHipY: number
   aspect: number
   at: number
+  cameraId?: string
 }
 
 /** Точка на плоскости кадра. `x` всегда уже приведён к единицам `y`. */
