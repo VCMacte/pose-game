@@ -90,11 +90,17 @@ export type PerAxisSummary = {
   /** По каждой оси из `spec.requires`, кроме ориентации: её судит присутствие. */
   axes: Partial<Record<Axis, AxisSummary>>
   /**
-   * Ось, помешавшая зачёту в наибольшем числе валидных кадров, и это число.
-   * Мешают `miss` и `unmeasured`; `excused` не мешает (дальняя конечность в
-   * профиле), `ok` тем более. `null` — помешавших осей не было вовсе.
+   * Ось, помешавшая зачёту в наибольшем числе валидных кадров, это число и
+   * ЕЁ ИСХОД. `blocked` (`miss + unmeasured`) намеренно ранжирует оба исхода
+   * вместе — так находится проблемная ось, — но называть её одним числом без
+   * исхода нельзя: потребитель, печатающий «хуже всего левый локоть, 3
+   * кадра», представил бы потерю трекинга (`unmeasured`) как промах ребёнка
+   * (`miss`) — худшую анти-цель проекта, только в показе, а не в зачёте.
+   * `outcome` здесь — исход-победитель этой оси (`AxisSummary.outcome`),
+   * `miss` либо `unmeasured`: ровно те два, что `blocked` считает вместе.
+   * `null` — помешавших осей не было вовсе.
    */
-  worst: { axis: Axis; frames: number } | null
+  worst: { axis: Axis; frames: number; outcome: Extract<AxisOutcome, 'miss' | 'unmeasured'> } | null
 }
 
 /** Почему приговор не `hit`. Есть ровно при `kind` ≠ `hit`. */
@@ -199,11 +205,21 @@ function outcome(valid: number, ratio: number): Verdict['kind'] {
 /**
  * Почему не `hit`. Причин ровно две, и каждая однозначно связана с `kind`:
  * `skip` бывает только от недостатка валидных кадров, `miss` — только от
- * недотянувшего отношения. Третьего исхода нет, поэтому набор исчерпан.
+ * недотянувшего отношения.
+ *
+ * Карта по всем значениям `kind`, а не `if`/тернарник: добавь четвёртый исход
+ * приговора — и запись `REASON[kind]` для него станет ошибкой компиляции, а не
+ * тихо подхватит `lowRatio`. `AxisTally` рядом в этом же файле держит ту же
+ * форму — полный `Record` по объединению вместо последовательности условий.
  */
+const REASON: Record<Verdict['kind'], VerdictReason | undefined> = {
+  hit: undefined,
+  skip: 'fewFrames',
+  miss: 'lowRatio',
+}
+
 function reason(kind: Verdict['kind']): VerdictReason | undefined {
-  if (kind === 'hit') return undefined
-  return kind === 'skip' ? 'fewFrames' : 'lowRatio'
+  return REASON[kind]
 }
 
 /** Добавляет приговор по оси одного кадра в итог окна. */
@@ -237,7 +253,12 @@ function worstAxis(acc: Partial<Record<Axis, AxisSummary>>): PerAxisSummary['wor
 
     const frames = blocked(s.counts)
 
-    if (frames > 0 && (worst === null || frames > worst.frames)) worst = { axis, frames }
+    if (frames > 0 && (worst === null || frames > worst.frames)) {
+      // `frames > 0` ⇒ `s.counts.miss` или `s.counts.unmeasured` ненулевой ⇒ их
+      // severity (3 либо 2) обошла `ok`/`excused` (0/1), значит `s.outcome` —
+      // ровно один из этих двух. Сужение явное, без приведения типа.
+      worst = { axis, frames, outcome: s.outcome === 'miss' ? 'miss' : 'unmeasured' }
+    }
   }
 
   return worst

@@ -45,7 +45,8 @@ test('g === null даёт why: none', () => {
 
 test('нормальная стойка в центре кадра — присутствие подтверждено', () => {
   const st = newPresenceState()
-  expect(presence(g({}), 0, st, 'front')).toEqual({ ok: true })
+  const gm = g({})
+  expect(presence(gm, 0, st, 'front')).toEqual({ ok: true, gm })
 })
 
 // --- порядок причин --------------------------------------------------------
@@ -101,7 +102,7 @@ test('порядок причин: lowvis → jump → scale → orientation →
       trusting(0.5, 0.22),
       'front',
     ),
-  ).toEqual({ ok: true })
+  ).toMatchObject({ ok: true })
 })
 
 test('каждая причина очистки срабатывает и в одиночку — очистка не вакуумна', () => {
@@ -153,7 +154,7 @@ test('вошедший в кадр человек ДАЛЬШЕ от камеры
 
 test('шаг игрока в сторону меньше порога — не подмена', () => {
   const st = trusting(0.5, 0.22)
-  expect(presence(g({ x: 0.68 }), 0, st, 'front')).toEqual({ ok: true })
+  expect(presence(g({ x: 0.68 }), 0, st, 'front')).toMatchObject({ ok: true })
   expect(st.trustedCx).toBeCloseTo(0.68, 6)
 })
 
@@ -188,7 +189,7 @@ test('доверенный торс не обновляется на кадра�
 
 test('первый кадр забега доверять нечему — jump не проверяется', () => {
   const st = newPresenceState()
-  expect(presence(g({ x: 0.8, torso: 0.4 }), 0, st, 'front')).toEqual({ ok: true })
+  expect(presence(g({ x: 0.8, torso: 0.4 }), 0, st, 'front')).toMatchObject({ ok: true })
   expect(st.trustedCx).toBeCloseTo(0.8, 6)
   expect(st.trustedS).toBeCloseTo(0.4, 6)
 })
@@ -204,7 +205,7 @@ test('доверие живёт только пока забег идёт: по�
   presence(null, 0, long, 'front')
   presence(null, 800, long, 'front')
   // Потеря дольше паузы: судейства на паузе нет, и запирать забег навсегда нельзя.
-  expect(presence(g({ x: 0.8 }), 830, long, 'front')).toEqual({ ok: true })
+  expect(presence(g({ x: 0.8 }), 830, long, 'front')).toMatchObject({ ok: true })
   expect(long.trustedCx).toBeCloseTo(0.8, 6)
 })
 
@@ -215,7 +216,7 @@ test('нижняя граница scale мерится шириной плеч �
   // профильная — нет. Граница по длине торса такого различить не могла бы, а
   // короткая проекция торса в приседе ею остановила бы забег.
   const squat = { torso: 0.1 }
-  expect(presence(g(squat), 0, trusting(0.5, 0.1), 'front')).toEqual({ ok: true })
+  expect(presence(g(squat), 0, trusting(0.5, 0.1), 'front')).toMatchObject({ ok: true })
   expect(
     presence(g({ ...squat, orientation: 'profile' }), 0, trusting(0.5, 0.1), 'profile'),
   ).toEqual({ ok: false, why: 'scale' })
@@ -229,11 +230,11 @@ test('присед против доверенного торса СТОЯ — �
   expect(ratio).toBeGreaterThan(1 / CONFIG.presence.jump.torsoGrowth)
 
   const st = trusting(0.5, 0.22)
-  expect(presence(g({ torso: 0.1 }), 0, st, 'front')).toEqual({ ok: true })
+  expect(presence(g({ torso: 0.1 }), 0, st, 'front')).toMatchObject({ ok: true })
 })
 
 test('слишком близко — по длине торса: присед её только укорачивает', () => {
-  expect(presence(g({ torso: 0.44 }), 0, trusting(0.5, 0.44), 'front')).toEqual({ ok: true })
+  expect(presence(g({ torso: 0.44 }), 0, trusting(0.5, 0.44), 'front')).toMatchObject({ ok: true })
   expect(presence(g({ torso: 0.46 }), 0, trusting(0.5, 0.46), 'front')).toEqual({
     ok: false,
     why: 'scale',
@@ -250,9 +251,9 @@ test('во фронтальном раунде боком — orientation', () =
 })
 
 test('в профильном раунде боком — норма, фронтально — orientation', () => {
-  expect(presence(g({ orientation: 'profile' }), 0, trusting(0.5, 0.22), 'profile')).toEqual({
-    ok: true,
-  })
+  expect(presence(g({ orientation: 'profile' }), 0, trusting(0.5, 0.22), 'profile')).toMatchObject(
+    { ok: true },
+  )
   expect(presence(g({ orientation: 'front' }), 0, trusting(0.5, 0.22), 'profile')).toEqual({
     ok: false,
     why: 'orientation',
@@ -270,7 +271,7 @@ test('игрок у любого края кадра даёт edge', () => {
     ok: false,
     why: 'edge',
   })
-  expect(presence(g({ x: 0.2 }), 0, trusting(0.2, 0.22), 'front')).toEqual({ ok: true })
+  expect(presence(g({ x: 0.2 }), 0, trusting(0.2, 0.22), 'front')).toMatchObject({ ok: true })
 })
 
 // --- пауза -----------------------------------------------------------------

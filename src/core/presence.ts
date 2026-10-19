@@ -30,17 +30,16 @@ import type { Orientation } from './types'
 /** Почему кадр не годен. Порядок перечисления — порядок проверок. */
 export type PresenceReason = 'none' | 'lowvis' | 'jump' | 'scale' | 'orientation' | 'edge'
 
-/** Приговор присутствия для одного кадра. `why` есть ровно при `ok: false`. */
-export type PresenceVerdict = { ok: true } | { ok: false; why: PresenceReason }
-
 /**
- * Тот же приговор, но годная ветка несёт ГЕОМЕТРИЮ подтверждённого кадра.
+ * Приговор присутствия для одного кадра. Годная ветка несёт ГЕОМЕТРИЮ
+ * подтверждённого кадра — ту же, что проверили причины отказа, — а не только
+ * флаг `ok`: иначе вызывающему, уже знающему `gm`, пришлось бы заново
+ * утверждать типом её присутствие (`gm!`), и ничто не связывало бы эту
+ * геометрию с тем кадром, который действительно прошёл проверку.
  *
- * Внутри файла это итог проверки причин. Наружу он нужен тем, кто получает
- * валидность уже вычисленной и не вправе считать её заново — судейством
- * (docs/judging.md, «Валидность приходит вместе с кадрами»): без суженной
- * геометрии судье пришлось бы держать недостижимые проверки на `null` ради
- * одних только типов.
+ * Используется и `presence()` наружу, и `judgeWindow()` (docs/judging.md,
+ * «Валидность приходит вместе с кадрами»): без геометрии в годной ветке судье
+ * пришлось бы держать недостижимые проверки на `null` ради одних только типов.
  */
 export type PresenceResult = { ok: true; gm: Geometry } | { ok: false; why: PresenceReason }
 
@@ -84,7 +83,7 @@ export function presence(
   t: number,
   st: PresenceState,
   expect: Orientation,
-): PresenceVerdict {
+): PresenceResult {
   const r = reason(gm, t, st, expect)
 
   if (r.ok) {
@@ -93,7 +92,7 @@ export function presence(
     st.trustedCx = r.gm.cx
     st.badSince = null
     st.goodSince = st.goodSince ?? t
-    return { ok: true }
+    return { ok: true, gm: r.gm }
   }
 
   st.badSince = st.badSince ?? t

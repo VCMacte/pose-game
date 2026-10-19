@@ -107,9 +107,11 @@ function checked(frames: Frame[], spec: PoseSpec = TEE): CheckedFrame[] {
     .map((f) => {
       const gm = f.lm === null ? null : geometry(f.lm, CAL.aspect)
       const v = presence(gm, f.t, st, spec.orientation)
-      // Присутствие подтвердило кадр — значит у него есть и скелет, и геометрия.
+      // `v.gm` приходит из самого `presence()` — геометрия уже увязана с его
+      // вердиктом, второй assertion на `lm` здесь не нужен: скелет кадра тот
+      // же, что видела геометрия, потому что оба взяты из одного `f`.
       return v.ok
-        ? ({ t: f.t, ok: true, lm: f.lm!, gm: gm! } as const)
+        ? ({ t: f.t, ok: true, lm: f.lm!, gm: v.gm } as const)
         : ({ t: f.t, ok: false, why: v.why } as const)
     })
 }
@@ -175,6 +177,7 @@ describe('знак сдвига на задержку', () => {
     const v = judge(series(SPAN_FROM, SPAN_TO, (t) => (t < CONTACT ? RIGHT : WRONG)))
 
     expect(v.kind).toBe('miss')
+    expect(v.frames).toBe(7)
     expect(v.valid).toBe(7)
     expect(v.matched).toBe(0)
     // При сдвиге назад те же кадры дали бы `hit` — ребёнок получил бы очки за
@@ -393,7 +396,7 @@ describe('perAxis', () => {
       unmeasured: 0,
       excused: 0,
     })
-    expect(v.perAxis.worst).toEqual({ axis: 'legs', frames: 4 })
+    expect(v.perAxis.worst).toEqual({ axis: 'legs', frames: 4, outcome: 'miss' })
   })
 
   test('несёт требуемое и измеренное значение промахнувшейся оси', () => {
@@ -440,5 +443,9 @@ describe('perAxis', () => {
     expect(v.matched).toBe(4)
     expect(v.kind).toBe('miss')
     expect(missed(v)).toEqual([])
+    // `worst` обязан нести исход: иначе потребитель напечатал бы «хуже всего
+    // левый локоть, 3 кадра» и выглядел бы так же для потери трекинга, как для
+    // промаха ребёнка — на это и пин.
+    expect(v.perAxis.worst).toEqual({ axis: 'leftElbow', frames: 3, outcome: 'unmeasured' })
   })
 })
