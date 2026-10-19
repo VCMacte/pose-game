@@ -7,7 +7,6 @@ test('CONFIG несёт все пороги из спека', () => {
   expect(CONFIG.legs.ankle.max).toBe(1.4)
   expect(CONFIG.judge.ratio).toBe(0.60)
   expect(CONFIG.judge.minValid).toBe(4)
-  expect(CONFIG.judge.skipBelow).toBe(3)
   expect(CONFIG.judge.windowMs).toBe(600)
   expect(CONFIG.score.hit).toBe(3)
   expect(CONFIG.score.miss).toBe(-2)

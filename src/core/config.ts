@@ -193,7 +193,6 @@ export const CONFIG = Object.freeze({
   judge: Object.freeze({
     ratio: 0.60,
     minValid: 4,
-    skipBelow: 3,
     windowMs: 600,
   }),
   score: Object.freeze({

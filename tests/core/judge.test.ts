@@ -2,8 +2,9 @@ import { describe, expect, test } from 'vitest'
 import type { Axis } from '../../src/core/axes'
 import { CONFIG } from '../../src/core/config'
 import { geometry } from '../../src/core/geometry'
-import { judgeWindow, type Verdict } from '../../src/core/judge'
+import { judgeWindow, type CheckedFrame, type Verdict } from '../../src/core/judge'
 import { POSES } from '../../src/core/poses'
+import { newPresenceState, presence, type PresenceReason } from '../../src/core/presence'
 import type { Calibration, Frame, Landmarks, PoseSpec } from '../../src/core/types'
 import { stick, type StickDesc } from '../../src/fake/stick'
 
@@ -11,8 +12,19 @@ import { stick, type StickDesc } from '../../src/fake/stick'
  * Окно судейства и приговор за раунд. Голосование по окну кадров — здесь;
  * совпадение одного кадра — в `match.test.ts`.
  *
- * Четыре правила держат этот файл:
+ * Валидность кадров судья не считает, а получает готовой, поэтому её здесь
+ * считает `checked()` — роль забега (задача 12): одна память присутствия на всю
+ * серию кадров, как на живой камере. Фикстуры от этого не изменились: `LOST`
+ * по-прежнему означает «трекер потерял ребёнка», просто отвергает такой кадр
+ * теперь присутствие забега, а не судья.
  *
+ * Пять правил держат этот файл:
+ *
+ * - **Что судья читает вердикт, а не пересчитывает его, проверяется кадрами с
+ *   вердиктом, назначенным ВРУЧНУЮ** (`valid()` / `invalid()`): верная поза,
+ *   отвергнутая забегом, не судится, а потерянный трекингом кадр, помеченный
+ *   годным, судится. Через `checked()` оба случая были бы невидимы — там
+ *   вердикт совпадает с тем, что судья посчитал бы сам.
  * - **Тест на ЗНАК сдвига обязан падать при смене знака.** Тест «сдвиг
  *   сдвигает окно» этого не ловит: ошибка в нём невидима. Поэтому задержка
  *   взята равной окну (`latency === windowMs`), и верное окно
@@ -62,6 +74,9 @@ const WRONG: Partial<StickDesc> = { ...RIGHT, leftShoulder: 'down', rightShoulde
 /** Верная поза, но трекер потерял ребёнка: кадр НЕвалиден (`lowvis`). */
 const LOST: Partial<StickDesc> = { ...RIGHT, visibility: 0.2 }
 
+/** Верная поза, но ребёнок у края кадра: присутствие отвергает (`edge`), поза совпадает. */
+const AT_EDGE: Partial<StickDesc> = { ...RIGHT, x: 0.07 }
+
 /** Неверная поза И потерянный трекинг: невалидный кадр, который нельзя засчитать. */
 const WRONG_LOST: Partial<StickDesc> = { ...WRONG, visibility: 0.2 }
 
@@ -75,8 +90,40 @@ const WINDOW_START = WINDOW_END - CONFIG.judge.windowMs
 /** 12 Гц: окно 600 мс даёт 7 кадров, как на живой камере. */
 const PERIOD = 83
 
-const judge = (frames: Frame[], spec: PoseSpec = TEE): Verdict =>
+const judgeChecked = (frames: CheckedFrame[], spec: PoseSpec = TEE): Verdict =>
   judgeWindow({ spec, frames, contactT: CONTACT, latencyMs: LATENCY, cal: CAL, strict: 1 })
+
+/**
+ * Роль ЗАБЕГА: присутствие считается один раз, непрерывной памятью по всей
+ * серии, и уезжает в судью вместе с кадрами. Кадры проходят через `presence()`
+ * в порядке времени — память присутствия автомат, и пропуск кадра сдвинул бы
+ * её, — включая негодные.
+ */
+function checked(frames: Frame[], spec: PoseSpec = TEE): CheckedFrame[] {
+  const st = newPresenceState()
+
+  return [...frames]
+    .sort((a, b) => a.t - b.t)
+    .map((f) => {
+      const gm = f.lm === null ? null : geometry(f.lm, CAL.aspect)
+      const v = presence(gm, f.t, st, spec.orientation)
+      // Присутствие подтвердило кадр — значит у него есть и скелет, и геометрия.
+      return v.ok
+        ? ({ t: f.t, ok: true, lm: f.lm!, gm: gm! } as const)
+        : ({ t: f.t, ok: false, why: v.why } as const)
+    })
+}
+
+const judge = (frames: Frame[], spec: PoseSpec = TEE): Verdict =>
+  judgeChecked(checked(frames, spec), spec)
+
+/** Кадры с ВРУЧНУЮ назначенным годным вердиктом — чем бы их ни считало присутствие. */
+const valid = (frames: Frame[]): CheckedFrame[] =>
+  frames.map((f) => ({ t: f.t, ok: true, lm: f.lm!, gm: geometry(f.lm!, ASPECT)! }))
+
+/** Кадры, ВРУЧНУЮ отвергнутые забегом по названной причине. */
+const invalid = (frames: Frame[], why: PresenceReason): CheckedFrame[] =>
+  frames.map((f) => ({ t: f.t, ok: false, why }))
 
 /** Кадры с шагом 12 Гц от `from` до `to` включительно; поза решается ВРЕМЕНЕМ кадра. */
 function series(from: number, to: number, at: (t: number) => Partial<StickDesc>): Frame[] {
@@ -132,6 +179,34 @@ describe('знак сдвига на задержку', () => {
     expect(v.matched).toBe(0)
     // При сдвиге назад те же кадры дали бы `hit` — ребёнок получил бы очки за
     // позу, которую отпустил ещё до касания стены.
+  })
+})
+
+describe('валидность приходит вместе с кадрами', () => {
+  test('кадр, отвергнутый забегом, не судится даже с верной позой', () => {
+    // Вошедшая в кадр мама: забег отверг кадры как `jump`, и ни одна поза в
+    // них зачёта не даёт. Своя память присутствия у судьи дала бы `hit` — в
+    // ней первый кадр окна доверенным торсом не проверяется вовсе.
+    const v = judgeChecked(invalid(inWindow(times(7, RIGHT)), 'jump'))
+
+    expect(v.frames).toBe(7)
+    expect(v.valid).toBe(0)
+    expect(v.matched).toBe(0)
+    expect(v.kind).toBe('skip')
+    expect(v.why).toBe('fewFrames')
+  })
+
+  test('кадр, признанный забегом годным, судится — судья вердикт не пересчитывает', () => {
+    // Фикстура подобрана так, что присутствие её отвергает (ребёнок у края
+    // кадра), а поза при этом верная: пересчитай судья годность — вышел бы
+    // `skip` при нуле валидных. Первая строка это и доказывает.
+    expect(judge(inWindow(times(5, AT_EDGE))).valid).toBe(0)
+
+    const v = judgeChecked(valid(inWindow(times(5, AT_EDGE))))
+
+    expect(v.valid).toBe(5)
+    expect(v.matched).toBe(5)
+    expect(v.kind).toBe('hit')
   })
 })
 
@@ -240,17 +315,20 @@ describe('мало кадров', () => {
     expect(v.kind).toBe('hit')
   })
 
-  test('валидных 3 — судится, но зачёта нет: miss, не skip', () => {
+  test('валидных 3 — skip, а не miss: порог один', () => {
+    // Порог один: `minValid`. Три валидных кадра — это «ребёнка почти не было
+    // видно», и минус два очка за такой раунд били бы по анти-цели «наказан за
+    // то, что трекер его потерял». Даже при идеальном отношении 3/3 — `skip`.
     const v = judge(inWindow([...times(3, RIGHT), ...times(4, LOST)]))
 
-    expect(v.valid).toBe(CONFIG.judge.skipBelow)
+    expect(v.valid).toBe(3)
     expect(v.matched).toBe(3)
     expect(v.ratio).toBe(1)
-    expect(v.kind).toBe('miss')
+    expect(v.kind).toBe('skip')
     expect(v.why).toBe('fewFrames')
   })
 
-  test('валидных меньше 3 — skip с why fewFrames', () => {
+  test('валидных 2 — skip с why fewFrames', () => {
     const v = judge(inWindow([...times(2, RIGHT), ...times(5, LOST)]))
 
     expect(v.valid).toBe(2)

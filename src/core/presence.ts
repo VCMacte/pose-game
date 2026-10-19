@@ -34,6 +34,17 @@ export type PresenceReason = 'none' | 'lowvis' | 'jump' | 'scale' | 'orientation
 export type PresenceVerdict = { ok: true } | { ok: false; why: PresenceReason }
 
 /**
+ * Тот же приговор, но годная ветка несёт ГЕОМЕТРИЮ подтверждённого кадра.
+ *
+ * Внутри файла это итог проверки причин. Наружу он нужен тем, кто получает
+ * валидность уже вычисленной и не вправе считать её заново — судейством
+ * (docs/judging.md, «Валидность приходит вместе с кадрами»): без суженной
+ * геометрии судье пришлось бы держать недостижимые проверки на `null` ради
+ * одних только типов.
+ */
+export type PresenceResult = { ok: true; gm: Geometry } | { ok: false; why: PresenceReason }
+
+/**
  * Память присутствия между кадрами. Меняется `presence()` на месте: это
  * автомат одного забега, а не значение.
  */
@@ -90,16 +101,13 @@ export function presence(
   return { ok: false, why: r.why }
 }
 
-/** Итог проверки причин: либо геометрия годного кадра, либо первая сработавшая причина. */
-type ReasonResult = { ok: true; gm: Geometry } | { ok: false; why: PresenceReason }
-
 /** Первая сработавшая причина отказа, либо годная геометрия кадра. */
 function reason(
   gm: Geometry | null,
   t: number,
   st: PresenceState,
   expect: Orientation,
-): ReasonResult {
+): PresenceResult {
   if (gm === null) return { ok: false, why: 'none' }
 
   const c = CONFIG.presence

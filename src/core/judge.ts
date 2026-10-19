@@ -1,9 +1,8 @@
 import { AXES, axes, type Axis } from './axes'
 import { CONFIG } from './config'
-import { geometry } from './geometry'
 import { matchFrame, type AxisOutcome, type AxisVerdict } from './match'
-import { newPresenceState, presence } from './presence'
-import type { Calibration, Frame, PoseSpec } from './types'
+import type { PresenceResult } from './presence'
+import type { Calibration, Landmarks, PoseSpec } from './types'
 
 /**
  * Приговор за раунд: голосование по окну кадров. Совпадение ОДНОГО кадра — не
@@ -11,8 +10,16 @@ import type { Calibration, Frame, PoseSpec } from './types'
  *
  * Читать вместе с docs/judging.md («Сдвиг на задержку», «Правило приговора»).
  * Это самая ответственная функция ядра: от неё зависит, что ребёнок увидит,
- * зелёную стену или красную. Пять правил держат файл:
+ * зелёную стену или красную. Шесть правил держат файл:
  *
+ * - **Валидность приходит ВМЕСТЕ с кадрами, судья её не считает.** Присутствие
+ *   забега — единственный источник истины о том, кто в кадре: вся защита от
+ *   подмены субъекта держится на НЕПРЕРЫВНОЙ памяти доверенного торса, и
+ *   первый кадр серии сознательно не проверяется вовсе. Своя память на каждое
+ *   окно означала бы, что внутри окна защита от вошедшей в кадр мамы
+ *   выключена, а приговор судьи расходится с тем, что видел забег. Поэтому
+ *   `judgeWindow()` не создаёт `PresenceState` и не зовёт `presence()`: он
+ *   получает кадры с уже вынесенным вердиктом и ЧИТАЕТ его.
  * - **Сдвиг на задержку — ВПЕРЁД:** окно равно
  *   `[contact + latency − windowMs, contact + latency]`. Ребёнок видит касание
  *   стены на `latency` ПОЗЖЕ, чем оно случилось в игре, и позу держит под то,
@@ -37,6 +44,26 @@ import type { Calibration, Frame, PoseSpec } from './types'
  *   журнала из node, а replay — единственный способ разобрать спорный раунд,
  *   не переигрывая его с ребёнком.
  */
+
+/** Годная ветка вердикта присутствия — та же, что у `presence.ts`, с геометрией кадра. */
+type Valid = Extract<PresenceResult, { ok: true }>
+
+/** Негодная ветка: одна причина отказа. Скелет и геометрия такому кадру не нужны. */
+type Invalid = Extract<PresenceResult, { ok: false }>
+
+/**
+ * Кадр, пришедший в судейство с УЖЕ вынесенным вердиктом присутствия.
+ *
+ * Собирает его тот, кто ведёт память присутствия забега (`run.ts`), на каждом
+ * кадре видео: `geometry()` → `presence()` с ориентацией, которую требует поза
+ * раунда, → кадр в буфер. Судья эту работу не повторяет — см. первое правило в
+ * doc-комментарии выше.
+ *
+ * Валидный кадр несёт скелет и геометрию ровно потому, что присутствие их уже
+ * проверило: типы говорят это вслух, и недостижимых проверок на `null` в
+ * судействе не остаётся.
+ */
+export type CheckedFrame = ({ t: number; lm: Landmarks } & Valid) | ({ t: number } & Invalid)
 
 /** Сколько валидных кадров окна дали каждый исход по одной оси. */
 export type AxisTally = Record<AxisOutcome, number>
@@ -79,7 +106,7 @@ export type Verdict = {
   why?: VerdictReason
   /** Кадров, попавших В ОКНО. Не число кадров раунда и не длина входа. */
   frames: number
-  /** Из них годных для суда (`presence()` не вернула отказ). */
+  /** Из них тех, что присутствие забега признало годными. */
   valid: number
   /** Из валидных — совпавших с позой. */
   matched: number
@@ -102,11 +129,14 @@ const blocked = (c: AxisTally): number => c.miss + c.unmeasured
  * Приговор за раунд по окну кадров.
  *
  * `contactT` — игровое время касания стены, `latencyMs` — задержка тракта
- * камера→экран. Оба в той же шкале, что `Frame.t`.
+ * камера→экран. Оба в той же шкале, что `CheckedFrame.t`.
+ *
+ * `frames` — кадры с уже вынесенным вердиктом присутствия; годность здесь не
+ * пересчитывается. Чистая функция: ни состояния, ни часов.
  */
 export function judgeWindow(args: {
   spec: PoseSpec
-  frames: Frame[]
+  frames: CheckedFrame[]
   contactT: number
   latencyMs: number
   cal: Calibration
@@ -118,27 +148,21 @@ export function judgeWindow(args: {
   const end = contactT + latencyMs
   const start = end - CONFIG.judge.windowMs
 
-  // Отбор по времени кадра, границы включительны. Порядок важен: присутствие —
-  // автомат, и доверенный торс оно ведёт от кадра к кадру.
+  // Отбор по времени кадра, границы включительны. Порядок по времени нужен
+  // `sample`: кадр-представитель оси — ПЕРВЫЙ кадр окна с худшим исходом.
   const window = frames.filter((f) => f.t >= start && f.t <= end).sort((a, b) => a.t - b.t)
 
-  const st = newPresenceState()
   const perAxis: Partial<Record<Axis, AxisSummary>> = {}
   let valid = 0
   let matched = 0
 
   for (const f of window) {
-    const lm = f.lm
-    const gm = geometry(lm, cal.aspect)
-    // Присутствие зовётся на КАЖДОМ кадре окна, включая негодные: оно ведёт
-    // память о субъекте, и пропуск кадра сдвинул бы её.
-    const ok = presence(gm, f.t, st, spec.orientation).ok
-    // Годный кадр без скелета и без геометрии невозможен — присутствие их уже
-    // отвергло, — но сузить типы иначе нечем.
-    if (!ok || lm === null || gm === null) continue
+    // Вердикт присутствия ЧИТАЕТСЯ. Пересчитать его здесь значило бы завести
+    // вторую память о субъекте — см. первое правило файла.
+    if (!f.ok) continue
 
     valid += 1
-    const m = matchFrame(spec, axes(lm, gm, cal, strict))
+    const m = matchFrame(spec, axes(f.lm, f.gm, cal, strict))
     if (m.matched) matched += 1
 
     for (const axis of Object.keys(m.perAxis) as Axis[]) absorb(perAxis, axis, m.perAxis[axis]!)
@@ -146,7 +170,7 @@ export function judgeWindow(args: {
 
   const ratio = valid === 0 ? 0 : matched / valid
   const kind = outcome(valid, ratio)
-  const why = reason(kind, valid)
+  const why = reason(kind)
 
   return {
     kind,
@@ -159,19 +183,27 @@ export function judgeWindow(args: {
   }
 }
 
-/** Приговор по итогам голосования. Порог `ratio` включителен, `minValid` тоже. */
+/**
+ * Приговор по итогам голосования. Оба порога включительны.
+ *
+ * Порог валидных кадров ОДИН — `minValid`. Любая вторая граница ниже него
+ * оставляла бы полосу, в которой раунд судится, а зачёт недоступен: минус два
+ * очка за раунд, в котором ребёнка почти не было видно. Разбор —
+ * docs/concept-and-plan.md, раздел развороты.
+ */
 function outcome(valid: number, ratio: number): Verdict['kind'] {
-  if (valid < CONFIG.judge.skipBelow) return 'skip'
-  return valid >= CONFIG.judge.minValid && ratio >= CONFIG.judge.ratio ? 'hit' : 'miss'
+  if (valid < CONFIG.judge.minValid) return 'skip'
+  return ratio >= CONFIG.judge.ratio ? 'hit' : 'miss'
 }
 
 /**
- * Почему не `hit`. Валидных меньше, чем требует `minValid`, — `fewFrames` и у
- * `skip`, и у `miss`: причина одна и та же, а различает их `kind`.
+ * Почему не `hit`. Причин ровно две, и каждая однозначно связана с `kind`:
+ * `skip` бывает только от недостатка валидных кадров, `miss` — только от
+ * недотянувшего отношения. Третьего исхода нет, поэтому набор исчерпан.
  */
-function reason(kind: Verdict['kind'], valid: number): VerdictReason | undefined {
+function reason(kind: Verdict['kind']): VerdictReason | undefined {
   if (kind === 'hit') return undefined
-  return valid < CONFIG.judge.minValid ? 'fewFrames' : 'lowRatio'
+  return kind === 'skip' ? 'fewFrames' : 'lowRatio'
 }
 
 /** Добавляет приговор по оси одного кадра в итог окна. */
