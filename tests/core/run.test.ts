@@ -194,6 +194,23 @@ describe('такты, счёт и конец забега', () => {
     expect(again.score).toBe(s.score)
   })
 
+  test('tick на времени назад бросает и ничего не меняет', () => {
+    const run = makeRun(opts())
+    const s = drive(run, START, START + 2_000, right)
+    const at = ticks(START, START + 2_000).at(-1)!
+
+    // Тем же временем — можно (`tick` идемпотентен), раньше — нет.
+    expect(() => run.tick(at, [])).not.toThrow()
+    expect(() => run.tick(at - 1, [])).toThrow(/время идёт назад/)
+    expect(() => run.tick(START, [{ t: START, lm: shot({}) }])).toThrow(/время идёт назад/)
+
+    // Отказ не сдвинул ни часы, ни журнал: проверка стоит до любой мутации.
+    expect(run.state.elapsedMs).toBe(s.elapsedMs)
+    expect(run.state.phase).toBe(s.phase)
+    expect(run.state.outcomes.length).toBe(s.outcomes.length)
+    expect(run.state.score).toBe(s.score)
+  })
+
   test('фаза раунда считается от времени каждый tick', () => {
     const run = makeRun(opts())
     const r = run.state.round!
@@ -354,6 +371,53 @@ describe('пауза', () => {
     const inWindow = window.filter((f) => f.t >= r1.verdictT - CONFIG.judge.windowMs && f.t <= r1.verdictT)
     expect(inWindow.length).toBeGreaterThanOrEqual(CONFIG.judge.minValid)
     expect(inWindow.every((f) => f.ok)).toBe(true)
+  })
+
+  test('пауза не входит в себя повторно: ни позы, ни причины она не перевыбирает', () => {
+    // `pauseRequested` — предикат от времени (`t - badSince >= pauseMs`), а не
+    // событие: пока ребёнка не видно, он истинен КАЖДЫЙ кадр. Без фазового
+    // сторожа пауза входила бы в себя дюжину раз в секунду, и каждый вход
+    // заново выбирает позу и переписывает причину. Часы и исходы это
+    // переживают — потому ни один другой тест не падает, — а вот оболочка
+    // рисует `pose` под своим отсчётом «3, 2, 1», `expected()` спрашивает у
+    // неё ориентацию для возврата (фронтальный возврат перед перевыбранной
+    // профильной позой — отказ `orientation` лотереей), и `pauseWhy` родитель
+    // читает как причину.
+    // Сам перевыбор виден по РАСХОДУ генератора: поза в снимке — ненадёжный
+    // свидетель, перевыбор дважды за `tick` возвращает её же (пул из двух поз
+    // после исключения предыдущей), и тест был бы зелёным по чётности.
+    let draws = 0
+    const run = makeRun(opts({ rnd: () => (draws += 1, 0) }))
+    const pausedAt = lostFrom + CONFIG.presence.pauseMs + PERIOD
+    const paused = drive(run, START, pausedAt, vanish)
+    expect(paused.phase).toBe('paused')
+
+    const pose = paused.pose
+    expect(pose).not.toBeNull()
+    const why = paused.pauseWhy
+    const drawnByPause = draws
+
+    // Ещё четыре секунды отсутствия — около пятидесяти кадров, на каждом из
+    // которых отказ длится дольше `pauseMs`.
+    const seen: RunState[] = []
+    for (const t of ticks(pausedAt + PERIOD, pausedAt + 4_000)) {
+      seen.push(run.tick(t, [{ t, lm: null }]))
+    }
+    expect(seen.length).toBeGreaterThan(40)
+
+    // Ни одного обращения к генератору за всю паузу: поза возврата выбрана
+    // один раз, в момент паузы.
+    expect(draws).toBe(drawnByPause)
+
+    for (const s of seen) {
+      expect(s.phase).toBe('paused')
+      // Тот же ОБЪЕКТ, а не просто та же поза.
+      expect(s.pose).toBe(pose)
+      expect(s.pauseWhy).toBe(why)
+    }
+
+    // И ни одного лишнего раунда в журнале: прерванный записан один раз.
+    expect(seen.at(-1)!.outcomes.length).toBe(1)
   })
 })
 
