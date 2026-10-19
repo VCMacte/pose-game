@@ -68,42 +68,75 @@ type Violations = {
 // eslint-disable-next-line @typescript-eslint/no-unused-vars
 type _AssertNoReservedKeysLeak<V extends never = Violations> = V
 
+/**
+ * Материализует `EventCtorKeys` в рантайм-массив и проверяет совпадение
+ * множества В ОБЕ СТОРОНЫ средствами компилятора — а не подсчётом поверх
+ * ВСЕХ экспортов модуля (как было раньше: `typeof v === 'function'` считает
+ * и `loggedPerAxis`, которая к `EventCtorKeys` не относится, так что счёт мог
+ * остаться прежним, даже если структурный фильтр перестал находить вообще
+ * ничего — ровно то вырождение, от которого защита заводилась).
+ *
+ * Ограничение параметра работает как двусторонняя проверка множества:
+ *
+ *  - `T extends readonly EventCtorKeys[]` — лишнее имя в массиве (которого
+ *    нет в `EventCtorKeys`) не удовлетворяет ограничению дженерика, и
+ *    компиляция падает уже на самом вызове `exactEventCtorNames([...])`;
+ *  - `Exclude<EventCtorKeys, T[number]> extends never ? T : never` — если в
+ *    `EventCtorKeys` есть имя, которого нет в переданном массиве, `Exclude`
+ *    возвращает непустой тип, параметр схлопывается в `never`, и передача
+ *    `arr` (массива, а не `never`) не компилируется.
+ *
+ * Критический случай — вырождение `EventCtorKeys` в `never` (структурный
+ * фильтр `extends EventShape` перестал находить конструкторы вообще).
+ * Тогда ограничение становится `T extends readonly never[]`, и уже сами
+ * строковые литералы массива — `'roundPreview'`, `'roundWall'` и так далее —
+ * не удовлетворяют ему: компиляция падает на вызове, а не проходит мимо,
+ * как проходил мимо старый счётчик по чужим экспортам.
+ */
+function exactEventCtorNames<T extends readonly EventCtorKeys[]>(
+  arr: Exclude<EventCtorKeys, T[number]> extends never ? T : never,
+): T {
+  return arr
+}
+
+const EVENT_CTOR_NAMES = exactEventCtorNames([
+  'roundPreview',
+  'roundWall',
+  'roundJudge',
+  'roundSkip',
+  'runStart',
+  'runFinish',
+  'health',
+  'pause',
+  'resume',
+  'sessionStart',
+  'build',
+  'error',
+  'errorPromise',
+  'visibility',
+  'camStart',
+  'camFail',
+  'camEnded',
+  'poseReady',
+  'poseFail',
+  'calibDone',
+  'calibNeed',
+  'calibStale',
+] as const)
+
 describe('конструкторы событий не заводят зарезервированные имена конверта', () => {
   test('проверка не схлопнулась в пустое множество (иначе это приговор без суда)', () => {
-    // Сама проверка — компиляция типа выше; здесь только защита от того, что
-    // механический фильтр типов случайно не нашёл НИ ОДНОГО конструктора и
-    // статическая проверка стала бы гарантом, который ничего не гарантирует —
-    // ровно как найденные в проекте раньше пять таких же.
+    // Сама проверка множества — компиляция вызова `exactEventCtorNames` выше:
+    // она ловит и лишнее имя, и недостающее, и вырождение `EventCtorKeys` в
+    // `never` — именно то, что старый рантайм-подсчёт по `typeof v ===
+    // 'function'` поймать не мог, потому что считал чужие экспорты, а не
+    // отобранное из них типом подмножество.
+    expect(EVENT_CTOR_NAMES.length).toBe(22)
+
     const names = Object.entries(ev)
       .filter(([, v]) => typeof v === 'function')
       .map(([k]) => k)
 
-    expect(names.length).toBeGreaterThanOrEqual(22)
-    expect(names).toEqual(
-      expect.arrayContaining([
-        'roundPreview',
-        'roundWall',
-        'roundJudge',
-        'roundSkip',
-        'runStart',
-        'runFinish',
-        'health',
-        'pause',
-        'resume',
-        'sessionStart',
-        'build',
-        'error',
-        'errorPromise',
-        'visibility',
-        'camStart',
-        'camFail',
-        'camEnded',
-        'poseReady',
-        'poseFail',
-        'calibDone',
-        'calibNeed',
-        'calibStale',
-      ]),
-    )
+    expect(names).toEqual(expect.arrayContaining([...EVENT_CTOR_NAMES]))
   })
 })
