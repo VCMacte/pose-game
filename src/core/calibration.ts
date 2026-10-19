@@ -131,6 +131,9 @@ export function isStale(cal: Calibration, now: number, aspect: number, cameraId:
   if (cal.cameraId !== cameraId) return true
   if (cal.aspect !== aspect) return true
   if (cal.takenAtMs === undefined) return true
+  // Часы СТЕНЫ (`takenAtMs`), не рамочные (`cal.at`) — см. doc-комментарий выше.
+  // Подмена на `cal.at` здесь — ровно тот прошлый дефект: рамочные часы обнуляются
+  // при перезапуске, и двухнедельная калибровка читалась бы как свежая.
   if (now - cal.takenAtMs > CONFIG.calibration.maxAgeMs) return true
   return false
 }
