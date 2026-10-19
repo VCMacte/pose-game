@@ -179,6 +179,7 @@ const ENTRIES: Entry[] = [
     tier: 3,
     requires: {
       support: 'both',
+      lean: 'upright',
       crouch: 'yes',
       knees: 'bent',
       legs: 'wide',
@@ -196,6 +197,7 @@ const ENTRIES: Entry[] = [
     tier: 3,
     requires: {
       support: 'both',
+      lean: 'upright',
       crouch: 'yes',
       knees: 'bent',
       legs: 'wide',

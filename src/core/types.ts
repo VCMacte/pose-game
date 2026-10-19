@@ -51,7 +51,16 @@ export type AxisRequirements = {
   footAtKnee: boolean
 }
 
-export type PoseTag = 'crouch' | 'lean' | 'asymmetric' | 'profile' | 'one-leg'
+/**
+ * Канонический список тегов — единственный источник, из которого выводятся
+ * все места, перечисляющие теги (тесты, тумблеры). `PoseTag` выводится из
+ * него же, а не объявляется отдельно, поэтому расхождения между типом и
+ * массивом в принципе не бывает — в отличие от `AXES`/`AxisRequirements`,
+ * которым нужен отдельный сторож на типах.
+ */
+export const POSE_TAGS = ['crouch', 'lean', 'asymmetric', 'profile', 'one-leg'] as const
+
+export type PoseTag = (typeof POSE_TAGS)[number]
 
 /** Описание одной позы: какие оси она требует судить, остальные не проверяются. */
 export type PoseSpec = {

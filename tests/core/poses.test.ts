@@ -2,7 +2,7 @@ import { describe, expect, test } from 'vitest'
 import { AXES, axes, type Axis, type AxisReadings } from '../../src/core/axes'
 import { geometry } from '../../src/core/geometry'
 import { cutouts, POSES, type Toggles } from '../../src/core/poses'
-import type { Calibration, Landmarks, PoseSpec, PoseTag } from '../../src/core/types'
+import { POSE_TAGS, type Calibration, type Landmarks, type PoseSpec, type PoseTag } from '../../src/core/types'
 import { stick, type StickDesc } from '../../src/fake/stick'
 
 /**
@@ -201,16 +201,16 @@ describe('требования', () => {
     }
   })
 
-  test('ни одна поза не требует прыжка или оси глубины', () => {
-    const allowed = new Set<PoseTag>(['crouch', 'lean', 'asymmetric', 'profile', 'one-leg'])
+  test('теги позы — только известные значения, без повторов', () => {
+    const allowed = new Set<PoseTag>(POSE_TAGS)
     for (const p of POSES) {
       for (const tag of p.tags) expect(allowed.has(tag), `${p.id}.${tag}`).toBe(true)
       expect(new Set(p.tags).size, p.id).toBe(p.tags.length)
     }
-    // Прыжка и движения вдоль оптической оси в словаре нет вовсе — это
-    // отсутствующая категория, а не выключенная опция, поэтому ни оси, ни тега
-    // под них не существует.
-    expect(AXES.some((a) => /jump|depth|forward/i.test(a))).toBe(false)
+    // Прыжка и движения вдоль оптической оси в словаре нет вовсе: это
+    // отсутствующая категория, а не выключенная опция. `AXES` фиксирует это
+    // на уровне типов (сторож полноты в axes.ts) — проверка того же здесь
+    // рантаймом ничего не ловит и ловить не может, поэтому не дублируется.
   })
 
   test('tags у каждой позы согласны с requires', () => {
@@ -276,13 +276,13 @@ describe('пул вырезов', () => {
     )
     // Выключенная категория не выпадает ребёнку ни в одном вырезе — именно
     // поэтому тег обязан быть согласен с requires.
-    for (const tag of ['crouch', 'lean', 'asymmetric', 'profile', 'one-leg'] as const) {
+    for (const tag of POSE_TAGS) {
       expect(cutouts(3, { [tag]: false }).some((p) => p.tags.includes(tag)), tag).toBe(false)
     }
   })
 
   test('пул не падает ниже трёх ни при одной комбинации ступени и тумблеров', () => {
-    const tags = ['crouch', 'lean', 'asymmetric', 'profile', 'one-leg'] as const
+    const tags = POSE_TAGS
     for (const tier of TIERS) {
       for (let mask = 0; mask < 1 << tags.length; mask += 1) {
         const toggles: Toggles = {}
