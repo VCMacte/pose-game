@@ -227,6 +227,17 @@ export const CONFIG = Object.freeze({
     /** Сумма упирается в ноль и ниже не уходит. */
     floor: 0,
   }),
+  /**
+   * Длительности тактов раунда (docs/judging.md «Четыре такта раунда»).
+   * Такт замирания своего числа НЕ имеет: он равен замеренной задержке тракта
+   * и выводится из неё в `round.ts` (`timingsFor`). Второе число здесь было бы
+   * второй копией задержки — и разъехалось бы с ней при первой перекалибровке.
+   */
+  round: Object.freeze({
+    previewMs: 2000,
+    wallMs: 2000,
+    verdictMs: 800,
+  }),
   run: Object.freeze({
     durationsSec: [60, 90, 120] as const,
     defaultDurationSec: 90,
