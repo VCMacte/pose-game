@@ -572,6 +572,38 @@ describe('отказ чтения не выключает журнал', () => {
     expect(events.map((e) => e.type)).toEqual(['a', 'b'])
   })
 
+  /**
+   * «Не читается» и «пусто» обязаны различаться: иначе служебный экран
+   * показывает «пусто» ровно тогда, когда журналу нечего доложить правду, —
+   * и это хуже, чем честное «журнал не читается» (см. docs/log-and-storage.md
+   * и ruling задачи 19: родитель должен узнавать о нечитаемом журнале).
+   */
+  test('status различает «не читается» и «пусто», и это не одно и то же', async () => {
+    const dbName = freshDb()
+    const c = clock(0)
+
+    // Отказавшее чтение: база пригодна (запись работает), но getAll бросает.
+    const brokenReadLog = makeJournal({
+      dbName,
+      idb: readsFailIdb(() => true),
+      now: c.now,
+      sessionId: 40,
+    })
+    const unreadable = await brokenReadLog.status()
+    expect(unreadable.readable).toBe(false)
+    expect(unreadable.broken).toBe(false) // отказ чтения не доказывает непригодность базы
+
+    // Настоящая пустая база: читается успешно, и в ней просто нет сессий.
+    const emptyLog = makeJournal({ dbName: freshDb(), idb: indexedDB, now: c.now, sessionId: 41 })
+    const empty = await emptyLog.status()
+    expect(empty.readable).toBe(true)
+    expect(empty.sessions).toBe(0)
+
+    // Оба отчёта говорят «0 сессий» — но это не одно и то же состояние.
+    expect(unreadable.sessions).toBe(empty.sessions)
+    expect(unreadable.readable).not.toBe(empty.readable)
+  })
+
   test('неудавшийся sweepExported не останавливает запись', async () => {
     const dbName = freshDb()
     const c = clock(0)

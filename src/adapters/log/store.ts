@@ -92,6 +92,16 @@ export type SaveResult = {
 
 export type Status = {
   broken: boolean
+  /**
+   * Удалось ли прочитать базу. `false` значит «не читается», а не «пусто»:
+   * `sessions: 0` у обеих одинаков, и без этого поля вызывающий не отличит
+   * честный пустой журнал от того, чья сводка сейчас недостоверна. Отказ
+   * чтения не поднимает `broken` (см. `broken` там же) — сама запись цела,
+   * недостоверна только ЭТА сводка. Нужно в первую очередь служебному экрану
+   * задачи 19: родитель обязан узнать «журнал не читается», а не увидеть
+   * молчаливый ноль, который неотличим от реально пустого журнала.
+   */
+  readable: boolean
   sessions: number
   events: number
   bytes: number
@@ -203,8 +213,13 @@ export function sameEvent(a: object | null | undefined, b: object | null | undef
  * событие с полем `t` молча затирало бы время записи — то есть журнал
  * сообщал бы неправду именно там, где его читают. Поэтому нагрузка
  * обрезается, а не доспоривает с конвертом.
+ *
+ * Единственная копия списка — здесь. `RESERVED_KEYS` экспортируется ради
+ * `tests/adapters/log-events-reserved.test-d.ts`: статическая проверка
+ * конструкторов `events.ts` берёт список отсюда, а не ретипирует его заново.
  */
-const RESERVED = new Set(['t', 'type', 'k', 'session', '_n', '_lastT'])
+export const RESERVED_KEYS = ['t', 'type', 'k', 'session', '_n', '_lastT'] as const
+const RESERVED = new Set<string>(RESERVED_KEYS)
 
 /** Запись в очереди: конверт плюс поля склейки. */
 type Queued = { t: number; type: string; _n?: number; _lastT?: number } & Record<string, unknown>
@@ -543,8 +558,12 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
    * наверняка — очередь в памяти, — и `broken` как он есть.
    */
   async function status(): Promise<Status> {
+    // И при `broken`, и при отказе самого чтения сводка одинаково
+    // недостоверна («не читается», а не «пусто») — `readable: false` здесь
+    // общее для обеих причин, а `broken` рядом говорит, какая именно.
     const unread = (): Status => ({
       broken,
+      readable: false,
       sessions: 0,
       events: pending(),
       bytes: queuedBytes,
@@ -566,6 +585,7 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
       return {
         // Не `false` литералом: сброс рядом мог оборваться, пока мы читали.
         broken,
+        readable: true,
         sessions: all.length,
         events,
         bytes,
@@ -574,6 +594,9 @@ export function makeJournal(over: Partial<JournalDeps> = {}): Journal {
         to: dates[dates.length - 1] ?? null,
       }
     } catch {
+      // Чтение сводки не удалось (например, `DataError`). Это отказ ОПЕРАЦИИ,
+      // а не доказательство непригодности базы: `broken` здесь не трогаем —
+      // запись продолжается, недостоверна только эта сводка.
       return unread()
     }
   }
