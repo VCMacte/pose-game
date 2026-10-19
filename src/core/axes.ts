@@ -153,12 +153,19 @@ const noReading = <T>(): AxisReading<T> => reading<T>('unknown', Number.NaN)
  */
 const unseen = <T>(): AxisReading<T> => reading<T>('unknown', Number.NaN)
 
-/** Полоса состояния: опорное значение и допуск вокруг него. */
-type Band<T> = { state: T; ref: number; tol: number }
+/**
+ * Полоса состояния: опорное значение и допуск вокруг него.
+ *
+ * Полосы и `pick` вынесены наружу не для удобства: по ним считается
+ * ПОДРАЗУМЕВАЕМОЕ состояние локтя (`dependencies.ts`), а второй набор тех же
+ * чисел рядом означал бы, что сторож согласованности сторожит свою копию
+ * порогов, а не те, по которым судит игра.
+ */
+export type Band<T> = { state: T; ref: number; tol: number }
 
 /** Расстояние по прямой и по кругу. `NaN` ни в одну полосу не попадает. */
-const linear = (a: number, b: number): number => Math.abs(a - b)
-const circular = (a: number, b: number): number => {
+export const linear = (a: number, b: number): number => Math.abs(a - b)
+export const circular = (a: number, b: number): number => {
   let d = (a - b) % 360
   if (d > 180) d -= 360
   if (d < -180) d += 360
@@ -172,7 +179,7 @@ const circular = (a: number, b: number): number => {
  * 65°, — и тогда ответ «не знаю»: различить их на этом кадре нечем. Ни одной
  * полосы — тоже «не знаю»: значение в зазоре между состояниями.
  */
-function pick<T>(
+export function pick<T>(
   value: number,
   bands: readonly Band<T>[],
   distance: (a: number, b: number) => number,
@@ -232,7 +239,7 @@ function orientationAxis(g: Geometry): AxisReading<Orientation> {
   return reading<Orientation>('unknown', ratio)
 }
 
-function shoulderBands(profile: boolean, strict: number): Band<ShoulderState>[] {
+export function shoulderBands(profile: boolean, strict: number): Band<ShoulderState>[] {
   const tol = CONFIG.shoulder.tolerance * strict
   return [
     { state: 'up', ref: ANGLE.up, tol },
@@ -244,7 +251,7 @@ function shoulderBands(profile: boolean, strict: number): Band<ShoulderState>[] 
   ]
 }
 
-function forearmBands(profile: boolean, strict: number): Band<ForearmState>[] {
+export function forearmBands(profile: boolean, strict: number): Band<ForearmState>[] {
   const tol = CONFIG.forearm.tolerance * strict
   return [
     { state: 'up', ref: ANGLE.up, tol },
@@ -275,26 +282,23 @@ function shoulderAxis(c: Ctx, side: Side): AxisReading<ShoulderState> {
   return reading<ShoulderState>('unknown', angle)
 }
 
+export function elbowBands(strict: number): Band<ElbowState>[] {
+  const straight = ANGLE.down - (ANGLE.down - CONFIG.elbow.straightMin) * strict
+  const mid = (CONFIG.elbow.bentMin + CONFIG.elbow.bentMax) / 2
+  const half = ((CONFIG.elbow.bentMax - CONFIG.elbow.bentMin) / 2) * strict
+  return [
+    { state: 'straight', ref: ANGLE.down, tol: ANGLE.down - straight },
+    { state: 'bent', ref: mid, tol: half },
+  ]
+}
+
 /** Локоть: угол плечо–локоть–кисть. */
 function elbowAxis(c: Ctx, side: Side): AxisReading<ElbowState> {
   const i = IDX[side]
   const angle = jointAngle(c.p(i.shoulder), c.p(i.elbow), c.p(i.wrist))
   if (!c.seen(i.shoulder, i.elbow, i.wrist)) return unseen<ElbowState>()
 
-  const straight = ANGLE.down - (ANGLE.down - CONFIG.elbow.straightMin) * c.strict
-  const mid = (CONFIG.elbow.bentMin + CONFIG.elbow.bentMax) / 2
-  const half = ((CONFIG.elbow.bentMax - CONFIG.elbow.bentMin) / 2) * c.strict
-  return reading(
-    pick(
-      angle,
-      [
-        { state: 'straight' as const, ref: ANGLE.down, tol: ANGLE.down - straight },
-        { state: 'bent' as const, ref: mid, tol: half },
-      ],
-      linear,
-    ),
-    angle,
-  )
+  return reading(pick(angle, elbowBands(c.strict), linear), angle)
 }
 
 /**

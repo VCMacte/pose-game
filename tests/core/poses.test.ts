@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'vitest'
 import { AXES, axes, type Axis, type AxisReadings } from '../../src/core/axes'
+import { strictness } from '../../src/core/config'
+import { dependentAxes, limbImplications } from '../../src/core/dependencies'
 import { geometry } from '../../src/core/geometry'
 import { cutouts, POSES, type Toggles } from '../../src/core/poses'
 import { POSE_TAGS, type Calibration, type Landmarks, type PoseSpec, type PoseTag } from '../../src/core/types'
@@ -43,6 +45,24 @@ function differing(a: PoseSpec, b: PoseSpec): Axis[] {
     const y = state(b, axis)
     return x !== undefined && y !== undefined && x !== y
   })
+}
+
+/** Все три строгости: полосы у них разной ширины, а правило одно. */
+const LEVELS = (['soft', 'normal', 'strict'] as const).map((l) => strictness(l))
+const NORMAL = strictness('normal')
+
+/**
+ * Запас различимости пары: оси, которые расходятся и при этом НЕ определены
+ * другими осями той же позы.
+ *
+ * Зависимая ось повторяет соседей (см. `src/core/dependencies.ts`), поэтому
+ * запасом быть не может: пара, разведённая только ею, — это пара, которую
+ * ребёнок не различает. Ось исключается, если зависима хоть у одной из двух
+ * поз: расхождение считается честным только там, где обе позы вольны выбирать.
+ */
+function independentDiffering(a: PoseSpec, b: PoseSpec, strict: number): Axis[] {
+  const dependent = new Set<Axis>([...dependentAxes(a, strict), ...dependentAxes(b, strict)])
+  return differing(a, b).filter((axis) => !dependent.has(axis))
 }
 
 const pairs = (): [PoseSpec, PoseSpec][] =>
@@ -150,6 +170,50 @@ describe('различимость', () => {
     }
   })
 
+  test('запас каждой пары набран НЕЗАВИСИМЫМИ осями, при любой строгости', () => {
+    // Расхождение по оси, чьё состояние определено другими осями той же позы,
+    // запасом не является: ось повторяет соседей, и считать её значило бы
+    // объявить различимыми две позы, которых ребёнок не различает — прямое
+    // попадание в анти-цель «две позы отличаются оттенком».
+    //
+    // Строгость входит сюда потому, что она сужает полосы: при `strict` рук
+    // становится определено БОЛЬШЕ, а значит запас — меньше. Пара обязана
+    // держаться на самой узкой настройке, а не только на нормальной.
+    for (const strict of LEVELS) {
+      for (const [a, b] of pairs()) {
+        if (a.orientation !== b.orientation) continue
+        expect(independentDiffering(a, b, strict), `${a.id} vs ${b.id} @${strict}`).not.toHaveLength(
+          0,
+        )
+      }
+    }
+  })
+
+  test('сторож запаса не считает ось, определённую соседями', () => {
+    // Сторож, который считает зависимую ось, выглядит как зелёный тест. У
+    // «Плоского Робота» левый локоть определён плечом `side` и предплечьем
+    // `up`, поэтому пара, разведённая ТОЛЬКО им, обязана дать нулевой запас —
+    // при полном расхождении в одну ось.
+    const robot = POSES.find((p) => p.id === 'robot')!
+    expect(dependentAxes(robot, NORMAL)).toContain('leftElbow')
+    const twin: PoseSpec = {
+      ...robot,
+      id: 'robot-twin',
+      name: 'Двойник',
+      requires: { ...robot.requires, leftElbow: 'straight' },
+    }
+    expect(differing(twin, robot)).toEqual(['leftElbow'])
+    expect(independentDiffering(twin, robot, NORMAL)).toHaveLength(0)
+    // И наоборот: независимая ось запасом остаётся.
+    const leaning: PoseSpec = {
+      ...robot,
+      id: 'robot-leaning',
+      name: 'Накренившийся',
+      requires: { ...robot.requires, lean: 'horizontal' },
+    }
+    expect(independentDiffering(leaning, robot, NORMAL)).toEqual(['lean'])
+  })
+
   test('сторож различимости ловит две похожие позы', () => {
     // Сторож, который ничего не ловит, выглядит как зелёный тест. Клон позы с
     // теми же требованиями обязан дать пустое расхождение — ровно то, на чём
@@ -232,6 +296,68 @@ describe('требования', () => {
         if (tags.has(tag)) expect(p.tier, `${p.id}.${tag}`).toBe(3)
       }
     }
+  })
+})
+
+describe('согласованность связанных осей', () => {
+  test('состояние звена — то, которое подразумевают два соседних', () => {
+    // Плечо, локоть и предплечье одной руки сидят на одном уравнении
+    // |плечо − предплечье| = 180° − локоть, поэтому поза, задавшая все три,
+    // могла задать их противоречиво: вырез показывал бы ребёнку руку, которой
+    // не бывает, а приговор требовал бы её же. До этого теста набор был
+    // согласован по случайности — теперь это проверено.
+    let checked = 0
+    const skipped = new Set<string>()
+    for (const strict of LEVELS) {
+      for (const p of POSES) {
+        for (const [axis, implied] of Object.entries(limbImplications(p, strict))) {
+          // Рука на камеру (`front` во фронтальном кадре) опознаётся
+          // вырождением проекции, а не углом: уравнение к ней не применяется.
+          if (implied.kind === 'no-angle') {
+            skipped.add(`${p.id}.${axis}`)
+            continue
+          }
+          const want = state(p, axis as Axis)
+          expect(implied.reachable, `${p.id}.${axis} @${strict}: не выразимо рукой`).toContain(want)
+          expect(implied.nominal, `${p.id}.${axis} @${strict}: не то, что в центре полос`).toContain(
+            want,
+          )
+          if (implied.kind === 'derived') {
+            expect(implied.state, `${p.id}.${axis} @${strict}`).toBe(want)
+          }
+          checked += 1
+        }
+      }
+    }
+    // Сторож, которому нечего сторожить, выглядит как зелёный тест.
+    expect(checked).toBeGreaterThan(0)
+    // И список необойдённого не вправе тихо расти: руки «на камеру» есть
+    // только у «Боксёра», и больше ни одна рука набора от проверки не уходит.
+    expect([...skipped].sort()).toEqual([
+      'boxer.leftElbow',
+      'boxer.leftForearm',
+      'boxer.leftShoulder',
+      'boxer.rightElbow',
+      'boxer.rightForearm',
+      'boxer.rightShoulder',
+    ])
+  })
+
+  test('сторож согласованности ловит подменённое состояние локтя', () => {
+    // Плечо `side` с предплечьем `up` оставляют локтю ровно `bent`: подменив
+    // его на `straight`, получаем руку, которой не бывает, — и тест выше
+    // обязан падать именно на этом.
+    const robot = POSES.find((p) => p.id === 'robot')!
+    const broken: PoseSpec = {
+      ...robot,
+      requires: { ...robot.requires, leftElbow: 'straight' },
+    }
+    const implied = limbImplications(broken, NORMAL).leftElbow!
+    expect(implied.kind).toBe('derived')
+    // Сужение типа: строка недостижима — `kind` проверен выше.
+    if (implied.kind === 'no-angle') throw new Error(implied.why)
+    expect(implied.reachable).not.toContain('straight')
+    expect(implied.reachable).toEqual(['bent'])
   })
 })
 
