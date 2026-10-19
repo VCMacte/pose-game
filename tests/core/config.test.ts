@@ -19,3 +19,7 @@ test('строгость масштабирует допуски', () => {
   expect(strictness('soft')).toBe(1.3)
   expect(strictness('strict')).toBe(0.75)
 })
+
+test('угол фикстуры глубокого приседа остаётся анатомически возможным', () => {
+  expect(CONFIG.knee.crouchDeep).toBeLessThan(CONFIG.knee.crouchVoteMax)
+})

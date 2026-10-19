@@ -23,6 +23,13 @@ export const CONFIG = Object.freeze({
     straightMin: 150,
     /** Колено голосует за присед и считается `bent` при угле меньше. */
     crouchVoteMax: 140,
+    /**
+     * Угол колена для фикстуры «глубокий присед». Независим от
+     * `crouchVoteMax` — не вычисляется из него, чтобы будущая перекалибровка
+     * `crouchVoteMax` не превратила эту фикстуру в анатомически невозможную.
+     * Корректность связи (`crouchDeep < crouchVoteMax`) проверяется тестом.
+     */
+    crouchDeep: 75,
   }),
   forearm: Object.freeze({
     /** Допуск вокруг опорных углов up/down/in/front. */

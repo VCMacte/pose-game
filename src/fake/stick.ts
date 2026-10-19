@@ -153,16 +153,13 @@ const LIMB_ANGLE: Record<Exclude<ShoulderState | ForearmState, 'front'>, number>
 const FRONT_FORESHORTEN = { lat: 0.5, down: 0.1 }
 const BENT_ANGLE = (CONFIG.elbow.bentMin + CONFIG.elbow.bentMax) / 2
 /**
- * Угол в колене глубокого приседа. Отсчитывается от КОЛЕННОГО порога
- * `CONFIG.knee.crouchVoteMax` (140°), а не от локтевого: своего порога у колена
- * в задаче 3 ещё не было, теперь он есть.
- *
- * Запас 65° вниз — не косметика: генератор обязан давать ОДНОЗНАЧНО глубокий
- * присед, а не кадр на границе голоса, иначе тест судил бы округление. Он же
- * сохраняет прежние 75°, из которых выведены полосы разноса КОЛЕН
- * (`CONFIG.legs.knee`): менять угол нельзя, не пересчитав их.
+ * Угол в колене глубокого приседа — фикстура берёт его из своего
+ * независимого порога `CONFIG.knee.crouchDeep`, а не вычисляет из
+ * `CONFIG.knee.crouchVoteMax`: из этого же числа выведены полосы разноса
+ * КОЛЕН (`CONFIG.legs.knee`), и связь `crouchDeep < crouchVoteMax`
+ * проверяется тестом, а не выражается арифметикой.
  */
-const CROUCH_KNEE = CONFIG.knee.crouchVoteMax - 65
+const CROUCH_KNEE = CONFIG.knee.crouchDeep
 const LEAN_ANGLE: Record<LeanState, number> = {
   upright: 0,
   'lean-left': (CONFIG.lean.tolerance + CONFIG.lean.horizontal) / 2,
