@@ -9,7 +9,7 @@ const verdict = (kind: Verdict['kind']): Verdict => ({
   valid: 0,
   matched: 0,
   ratio: 0,
-  sample: undefined as unknown as Verdict['sample'],
+  perAxis: { axes: {}, worst: null },
 })
 
 describe('applyVerdict', () => {

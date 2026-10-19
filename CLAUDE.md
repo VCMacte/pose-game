@@ -35,7 +35,8 @@ Vite + TypeScript, тесты vitest, зависимости из npm. Архи�
 ```
 npm install --maxsockets 4 --no-audit --no-fund
 npm run dev
-npm test -- --maxWorkers=8
+npm run typecheck                 # tsc --noEmit отдельно, без тестов
+npm test -- --maxWorkers=8        # tsc --noEmit, затем vitest run
 node tools/log-report.mjs <файл>   # числа забега из журнала с телефона
 node tools/replay.mjs <файл>       # запись скелета через нынешнее ядро
 node tools/make-sw.mjs             # пересобрать список кэша и поднять версию

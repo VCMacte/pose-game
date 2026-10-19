@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "test": "vitest run"
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck && vitest run"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.17"
