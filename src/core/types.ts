@@ -69,6 +69,8 @@ export type PoseSpec = {
   tier: 1 | 2 | 3
   orientation: Orientation
   mirror: boolean
+  /** Id зеркальной пары, если она есть в наборе; иначе `undefined`. */
+  mirrorId: string | undefined
   requires: Partial<AxisRequirements>
   tags: PoseTag[]
 }

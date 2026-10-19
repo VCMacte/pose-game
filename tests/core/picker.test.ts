@@ -1,5 +1,6 @@
-import { describe, expect, test } from 'vitest'
+import { describe, expect, test, vi } from 'vitest'
 import { nextPose, toggleAllowed } from '../../src/core/picker'
+import * as posesModule from '../../src/core/poses'
 import { cutouts, type Toggles } from '../../src/core/poses'
 import { POSE_TAGS, type PoseSpec } from '../../src/core/types'
 
@@ -16,11 +17,6 @@ function makeRnd(seed: number): () => number {
     s >>>= 0
     return s / 0xffffffff
   }
-}
-
-/** Зеркало позы по id — та же схема, что строит `spec()` в poses.ts. */
-function mirrorId(p: PoseSpec): string {
-  return p.mirror ? p.id.replace(/-mirror$/, '') : `${p.id}-mirror`
 }
 
 describe('toggleAllowed', () => {
@@ -74,7 +70,8 @@ describe('nextPose', () => {
     let prev: PoseSpec | null = null
     for (let i = 0; i < ROUNDS; i += 1) {
       const next = nextPose(prev, 3, {}, rnd)
-      if (prev !== null) expect(next.id, `раунд ${i}`).not.toBe(mirrorId(prev))
+      if (prev !== null && prev.mirrorId !== undefined)
+        expect(next.id, `раунд ${i}`).not.toBe(prev.mirrorId)
       prev = next
     }
   })
@@ -105,6 +102,20 @@ describe('nextPose', () => {
     const rnd = makeRnd(5)
     const first = nextPose(null, 1, {}, rnd)
     expect(cutouts(1).map((p) => p.id)).toContain(first.id)
+  })
+
+  // У реального набора поз пул после исключения prev и его зеркала никогда не
+  // опустошается (toggleAllowed это гарантирует) — поэтому, чтобы проверить
+  // громкий отказ, здесь подменяется cutouts() урезанным пулом из самой prev
+  // (и её зеркала, если оно есть): это единственный способ воспроизвести
+  // ветку, которая в боевых данных недостижима.
+  test('бросает громко, если пул опустел после исключения prev и её зеркала', () => {
+    const rnd = makeRnd(1)
+    const prev = cutouts(3)[0]
+    const tiny: PoseSpec[] = prev.mirrorId !== undefined ? [prev, { ...prev, id: prev.mirrorId }] : [prev]
+    const spy = vi.spyOn(posesModule, 'cutouts').mockReturnValue(tiny)
+    expect(() => nextPose(prev, 3, {}, rnd)).toThrow(/пул опустел/)
+    spy.mockRestore()
   })
 
   test('чистая функция: одинаковый rnd даёт одинаковую последовательность', () => {

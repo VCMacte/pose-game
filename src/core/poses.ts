@@ -342,13 +342,20 @@ function mirrorRequires(r: Requires): Requires {
   return m
 }
 
-function spec(e: Entry, mirror: boolean): PoseSpec {
+/**
+ * `mirrorId` считается здесь же, где строится `id` зеркала (`${e.id}-mirror`)
+ * — единственное место в проекте, которое знает схему именования зеркал.
+ * Все прочие места (picker.ts, тесты) читают готовое поле, а не
+ * реконструируют связь по строке id.
+ */
+function spec(e: Entry, mirror: boolean, mirrorId: string | undefined): PoseSpec {
   return {
     id: mirror ? `${e.id}-mirror` : e.id,
     name: e.name,
     tier: e.tier,
     orientation: e.orientation ?? 'front',
     mirror,
+    mirrorId,
     requires: mirror ? mirrorRequires(e.requires) : e.requires,
     // Своя копия: оригинал и зеркало иначе делили бы один массив тегов.
     tags: [...e.tags],
@@ -357,7 +364,9 @@ function spec(e: Entry, mirror: boolean): PoseSpec {
 
 /** Все вырезы набора: оригиналы и зеркала, в порядке возрастания ступени. */
 export const POSES: readonly PoseSpec[] = ENTRIES.flatMap((e) =>
-  e.mirrored === true ? [spec(e, false), spec(e, true)] : [spec(e, false)],
+  e.mirrored === true
+    ? [spec(e, false, `${e.id}-mirror`), spec(e, true, e.id)]
+    : [spec(e, false, undefined)],
 )
 
 /**

@@ -124,6 +124,19 @@ describe('набор', () => {
     expect(POSES.filter((p) => p.orientation === 'profile' && p.mirror)).toEqual([])
   })
 
+  test('mirrorId указывает на пару по имени и обратно (picker.ts читает только это поле)', () => {
+    for (const m of POSES.filter((p) => p.mirror)) {
+      const origin = POSES.find((p) => p.name === m.name && !p.mirror)
+      expect(origin, m.id).toBeDefined()
+      if (origin === undefined) continue
+      expect(m.mirrorId, m.id).toBe(origin.id)
+      expect(origin.mirrorId, origin.id).toBe(m.id)
+    }
+    for (const p of POSES.filter((p) => !p.mirror && POSES.every((q) => !(q.mirror && q.name === p.name)))) {
+      expect(p.mirrorId, p.id).toBeUndefined()
+    }
+  })
+
   test('зеркало — перестановка левого и правого при том же названии', () => {
     for (const m of POSES.filter((p) => p.mirror)) {
       const origin = POSES.find((p) => p.name === m.name && !p.mirror)
