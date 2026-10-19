@@ -8,6 +8,7 @@ import { stick } from '../../src/fake/stick'
 const ASPECT = 16 / 9
 const CAMERA = 'cam-1'
 const DAY_MS = 24 * 60 * 60 * 1000
+const WALL_NOW = 1_700_000_000_000 // произвольная точка часов стены — далеко от нуля, как и в жизни
 
 /** Кадр нейтральной стойки: торс и центр — единственное, что варьируют тесты. */
 const neutralFrame = (torso: number, x: number) =>
@@ -26,31 +27,41 @@ function fill(
   return c
 }
 
-test('значения берутся медианой, не средним — один выброс втрое не сдвигает S0', () => {
+test('значения берутся медианой, не средним — один выброс втрое не сдвигает ни одно из пяти полей', () => {
   const STEP = 100 // 11 Гц ≈ каждые ~90 мс; 100 мс даёт >= minSamples за 5 секунд
-  const n = Math.ceil(CONFIG.calibration.durationMs / STEP) + 1
-  const c = fill(n, STEP, (i) => (i === 10 ? neutralFrame(0.22 * 3, 0.5) : neutralFrame(0.22, 0.5)))
-  const result = c.done()
+  const base = neutralFrame(0.22, 0.5)
+  const c = fill(Math.ceil(CONFIG.calibration.durationMs / STEP) + 1, STEP, (i) =>
+    i === 10 ? neutralFrame(0.22 * 3, 0.5) : base,
+  )
+  const result = c.done(WALL_NOW)
   expect('S0' in result).toBe(true)
-  expect((result as Calibration).S0).toBeCloseTo(0.22, 6)
+  const cal = result as Calibration
+  // Выброс при i===10 меняет torso, а значит и S, shoulderWidth, shoulderY, hipY — ни одно
+  // из пяти медианных полей не должно сдвинуться, иначе это была бы не медиана, а среднее.
+  expect(cal.S0).toBeCloseTo(base.S, 6)
+  expect(cal.shoulderWidth).toBeCloseTo(base.shoulderRatio * base.S, 6)
+  expect(cal.neutralX).toBeCloseTo(base.cx, 6)
+  expect(cal.neutralShoulderY).toBeCloseTo(base.shoulderMid.y, 6)
+  expect(cal.neutralHipY).toBeCloseTo(base.hipMid.y, 6)
 })
 
 test('5 секунд набраны — отдаёт калибровку', () => {
   const STEP = 100
   const n = Math.ceil(CONFIG.calibration.durationMs / STEP) + 1
   const c = fill(n, STEP, () => neutralFrame(0.22, 0.5))
-  const result = c.done()
+  const result = c.done(WALL_NOW)
   expect('S0' in result).toBe(true)
   const cal = result as Calibration
   expect(cal.S0).toBeCloseTo(0.22, 6)
   expect(cal.neutralX).toBeCloseTo(0.5, 6)
   expect(cal.aspect).toBe(ASPECT)
-  expect(cal.at).toBe((n - 1) * STEP)
+  expect(cal.at).toBe((n - 1) * STEP) // рамочные часы — последний отсчёт стадии
+  expect(cal.takenAtMs).toBe(WALL_NOW) // часы стены — что передали в done()
 })
 
 test('мало отсчётов — need more (срок стадии не набран)', () => {
   const c = fill(5, 100) // 400 мс — меньше durationMs
-  expect(c.done()).toEqual({ need: 'more' })
+  expect(c.done(WALL_NOW)).toEqual({ need: 'more' })
 })
 
 test('мало отсчётов — need more (срок набран, но кадры редкие)', () => {
@@ -59,7 +70,7 @@ test('мало отсчётов — need more (срок набран, но ка�
   const c = makeCalibrator(ASPECT, CAMERA)
   c.push(neutralFrame(0.22, 0.5), 0)
   c.push(neutralFrame(0.22, 0.5), CONFIG.calibration.durationMs)
-  expect(c.done()).toEqual({ need: 'more' })
+  expect(c.done(WALL_NOW)).toEqual({ need: 'more' })
 })
 
 test('игрок шевелился — need steady, отличимо от «мало отсчётов»', () => {
@@ -67,7 +78,17 @@ test('игрок шевелился — need steady, отличимо от «м�
   const n = Math.ceil(CONFIG.calibration.durationMs / STEP) + 1
   // Центр качается далеко за порог устойчивости, но отсчётов и времени достаточно.
   const c = fill(n, STEP, (i) => neutralFrame(0.22, i % 2 === 0 ? 0.5 : 0.5 + CONFIG.calibration.steadyCx * 3))
-  expect(c.done()).toEqual({ need: 'steady' })
+  expect(c.done(WALL_NOW)).toEqual({ need: 'steady' })
+})
+
+test('done(), пройдя через isStale с той же камерой и aspect, читается как свежая (круговой тест)', () => {
+  const STEP = 100
+  const n = Math.ceil(CONFIG.calibration.durationMs / STEP) + 1
+  const c = fill(n, STEP)
+  const cal = c.done(WALL_NOW) as Calibration
+  expect('S0' in cal).toBe(true)
+  // Проверка сразу после калибровки, той же камерой и aspect — не должна требовать пересдачи.
+  expect(isStale(cal, WALL_NOW, ASPECT, CAMERA)).toBe(false)
 })
 
 function freshCalibration(overrides: Partial<Calibration> = {}): Calibration {
@@ -79,27 +100,49 @@ function freshCalibration(overrides: Partial<Calibration> = {}): Calibration {
     neutralHipY: 0.62,
     aspect: ASPECT,
     at: 0,
+    takenAtMs: WALL_NOW,
     cameraId: CAMERA,
     ...overrides,
   }
 }
 
 test('смена aspect делает калибровку устаревшей', () => {
-  const cal = freshCalibration({ at: 1000 })
-  expect(isStale(cal, 1000, 1, CAMERA)).toBe(true)
+  const cal = freshCalibration()
+  expect(isStale(cal, WALL_NOW, 1, CAMERA)).toBe(true)
 })
 
 test('смена камеры делает калибровку устаревшей', () => {
-  const cal = freshCalibration({ at: 1000 })
-  expect(isStale(cal, 1000, ASPECT, 'cam-2')).toBe(true)
+  const cal = freshCalibration()
+  expect(isStale(cal, WALL_NOW, ASPECT, 'cam-2')).toBe(true)
 })
 
-test('14 дней делают калибровку устаревшей', () => {
-  const cal = freshCalibration({ at: 0 })
-  expect(isStale(cal, 14 * DAY_MS + 1, ASPECT, CAMERA)).toBe(true)
+test('14 дней (по часам стены) делают калибровку устаревшей', () => {
+  const cal = freshCalibration({ takenAtMs: WALL_NOW })
+  expect(isStale(cal, WALL_NOW + 14 * DAY_MS + 1, ASPECT, CAMERA)).toBe(true)
 })
 
 test('без смены камеры, aspect и до срока — калибровка остаётся годной', () => {
-  const cal = freshCalibration({ at: 0 })
-  expect(isStale(cal, 14 * DAY_MS - 1, ASPECT, CAMERA)).toBe(false)
+  const cal = freshCalibration({ takenAtMs: WALL_NOW })
+  expect(isStale(cal, WALL_NOW + 14 * DAY_MS - 1, ASPECT, CAMERA)).toBe(false)
+})
+
+test('калибровка без takenAtMs (ручная сборка) читается как устаревшая — отказ в безопасную сторону', () => {
+  const cal = freshCalibration({ takenAtMs: undefined })
+  expect(isStale(cal, WALL_NOW, ASPECT, CAMERA)).toBe(true)
+})
+
+test('14-дневная калибровка остаётся устаревшей при перезапуске сессии — часы стены и рамочные часы разделены', () => {
+  const STEP = 100
+  const n = Math.ceil(CONFIG.calibration.durationMs / STEP) + 1
+  // Забег 1: рамочные часы (t) идут от 0 — калибровка снята в его конце, но часы стены (`WALL_NOW`)
+  // в момент done() — настоящая дата калибровки, не зависящая от сессии.
+  const c = fill(n, STEP)
+  const cal = c.done(WALL_NOW) as Calibration
+
+  // Две недели спустя — новый запуск приложения: рамочные часы снова начинаются от нуля
+  // (вот что было бы, если бы isStale сравнивала по `at`), но часы стены ушли на 14+ дней вперёд.
+  const sessionTwoFrameNow = STEP * 30 // несколько секунд после старта новой сессии — на случай regress по `at`
+  const wallNowTwoWeeksLater = WALL_NOW + 14 * DAY_MS + 1
+  expect(sessionTwoFrameNow).toBeLessThan(cal.at) // рамочные часы правда «отмотались назад»
+  expect(isStale(cal, wallNowTwoWeeksLater, ASPECT, CAMERA)).toBe(true)
 })
