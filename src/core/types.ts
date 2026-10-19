@@ -74,3 +74,6 @@ export type Calibration = {
   aspect: number
   at: number
 }
+
+/** Точка на плоскости кадра. `x` всегда уже приведён к единицам `y`. */
+export type Pt = { x: number; y: number }

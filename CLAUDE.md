@@ -10,9 +10,9 @@
 [`docs/concept-and-plan.md`](docs/concept-and-plan.md). **Один факт живёт в
 одном файле** — правило разобрано ниже.
 
-**Кода пока нет.** Проект на стадии плана: спек утверждён, план реализации
-написан, первая задача не начата. Поэтому строка «Код» у тем называет
-*запланированные* файлы и говорит об этом прямо.
+**Код начат.** Ядро пишется задачами 1–12 плана: уже есть каркас сборки и
+тестов, типы с порогами и нормализация геометрии. Поэтому строка «Код» у тем
+называет файлы, часть которых ещё НЕ существует, и говорит об этом прямо.
 → [`docs/superpowers/plans/2026-10-19-pose-game.md`](docs/superpowers/plans/2026-10-19-pose-game.md)
 
 ## Железо, под которое всё сделано
@@ -33,9 +33,9 @@ Vite + TypeScript, тесты vitest, зависимости из npm. Архи�
 → [`docs/architecture.md`](docs/architecture.md)
 
 ```
-npm install --maxsockets 2 --no-audit --no-fund
+npm install --maxsockets 4 --no-audit --no-fund
 npm run dev
-npm test -- --maxWorkers=4
+npm test -- --maxWorkers=8
 node tools/log-report.mjs <файл>   # числа забега из журнала с телефона
 node tools/replay.mjs <файл>       # запись скелета через нынешнее ядро
 node tools/make-sw.mjs             # пересобрать список кэша и поднять версию

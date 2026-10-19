@@ -25,14 +25,26 @@ function listFiles(dir: string): string[] {
   return files
 }
 
-test('ядро не импортирует адаптеры и оболочку', () => {
+/** Импорт наружу ядра: в адаптеры, в оболочку или в стенд синтетики. */
+const FORBIDDEN = /from\s+['"][.\/]*(adapters|shell|fake)\//
+
+test('регулярка границы ловит настоящую строку импорта', () => {
+  // Одноразовая проверка файлом-нарушителем от регресса самой регулярки не
+  // защищает: сторож, который ничего не ловит, выглядит как зелёный тест.
+  expect(FORBIDDEN.test("import { x } from '../../adapters/foo'")).toBe(true)
+  expect(FORBIDDEN.test("import { x } from './shell/screens'")).toBe(true)
+  expect(FORBIDDEN.test("import { stick } from '../fake/stick'")).toBe(true)
+  expect(FORBIDDEN.test("import { x } from './landmarks'")).toBe(false)
+  expect(FORBIDDEN.test("// про adapters/ здесь только слова")).toBe(false)
+})
+
+test('ядро не импортирует адаптеры, оболочку и стенд синтетики', () => {
   const coreFiles = listFiles(join(ROOT, 'src/core')).filter((f) => f.endsWith('.ts'))
-  const forbidden = /from\s+['"][.\/]*(adapters|shell)\//
 
   const violations: string[] = []
   for (const file of coreFiles) {
     const content = readFileSync(file, 'utf-8')
-    if (forbidden.test(content)) {
+    if (FORBIDDEN.test(content)) {
       violations.push(file)
     }
   }

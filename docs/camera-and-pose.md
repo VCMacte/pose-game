@@ -4,8 +4,8 @@
 нормализации точек, сглаживания и частоты кадров.
 
 Родитель: [`../CLAUDE.md`](../CLAUDE.md).
-Код (запланирован, ещё не написан): `src/adapters/camera.ts`,
-`src/adapters/pose/*`, `src/core/geometry.ts`.
+Код: `src/core/landmarks.ts`, `src/core/geometry.ts`; запланированы, ещё не
+написаны — `src/adapters/camera.ts`, `src/adapters/pose/*`.
 Замысел и обоснование чисел: [`concept-and-plan.md`](concept-and-plan.md).
 
 ## Нормализация: всё в долях торса
