@@ -662,7 +662,7 @@ describe('выгрузка', () => {
   test('save отдаёт и файл, и данные для «Поделиться» — именно в таком порядке', async () => {
     const sh = shell()
     const { log } = journal({ now: clock(0).now, sessionId: 7, ...sh.deps })
-    log.write(ev.roundWall({ travelMs: 1500, latencyShiftMs: 120 }))
+    log.write(ev.roundWall({ travelMs: 1500, latencyShiftMs: 120, contactT: 3500 }))
 
     const res = await log.save()
 
@@ -896,6 +896,9 @@ describe('конструкторы событий', () => {
     const calib = ev.calibDone({
       S0: 0.31,
       shoulderWidth: 0.26,
+      neutralX: 0.5,
+      neutralShoulderY: 0.3,
+      neutralHipY: 0.6,
       aspect: 16 / 9,
       at: 1234,
       takenAtMs: 1_760_000_000_000,
@@ -903,6 +906,13 @@ describe('конструкторы событий', () => {
     })
     expect(calib.data.at).toBe(1234)
     expect(calib.data.takenAtMs).toBe(1_760_000_000_000)
+    /*
+     * Нейтральные высоты записываются ТОЖЕ: по ним судится присед, и без них
+     * replay отвечает «нет калибровки» на каждый раунд настоящего журнала.
+     * Поймано при подключении забега к журналу.
+     */
+    expect(calib.data.neutralShoulderY).toBe(0.3)
+    expect(calib.data.neutralHipY).toBe(0.6)
   })
 })
 

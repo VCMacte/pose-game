@@ -201,10 +201,52 @@ describe('служебный экран', () => {
     }
   })
 
-  test('кнопка замера задержки есть', () => {
-    const a = app()
+  test('кнопка замера задержки ДЕЛАЕТ замер, а не просто есть', async () => {
+    /*
+     * Прошлая версия проверяла лишь наличие кнопки — и проходила, пока все
+     * кнопки служебного экрана были заглушками `() => {}`. Кнопка, которая
+     * нажимается и ничего не меняет, выглядит сломанной игрой, а отличить её
+     * от сломанной на штативе нечем.
+     */
+    let asked = 0
+    const a = app({
+      measureLatency: async () => {
+        asked++
+        return { medianMs: 240, spreadMs: 12 }
+      },
+    })
     a.go('service')
     expect(byTest('measure-latency')).not.toBeNull()
+    byTest('measure-latency')!.click()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(asked).toBe(1)
+    expect(a.latency).toEqual({ medianMs: 240, spreadMs: 12 })
+    // И результат ПОКАЗАН, а не только сохранён.
+    expect(text()).toContain('240')
+  })
+
+  test('кнопки журнала зовут журнал, а не молчат', async () => {
+    let saved = 0
+    let cleared = 0
+    const a = app({
+      saveLog: async () => void saved++,
+      clearLog: async () => void cleared++,
+    })
+    a.go('service')
+    byTest('share-log')!.click()
+    byTest('clear-log')!.click()
+    await Promise.resolve()
+    expect(saved).toBe(1)
+    expect(cleared).toBe(1)
+  })
+
+  test('пересдача калибровки забывает её: следующий забег начнётся со стадии', () => {
+    const a = app()
+    a.go('service')
+    byTest('recalibrate')!.click()
+    a.go('run')
+    expect(a.runStage()).toBe('calibration')
   })
 })
 
@@ -223,6 +265,39 @@ describe('забег', () => {
     const a = app()
     a.go('run')
     expect(a.runStage()).toBe('calibration')
+  })
+
+  test('забег ПРОДВИГАЕТСЯ кадрами и рисует, а не стоит заглушкой', () => {
+    /*
+     * Прошлая версия тестов экрана забега проходила при `step`, который ничего
+     * не делал: `runStage()` возвращал константу, рендер не звался ни разу.
+     * Здесь кадр экрана прогоняется руками, а рендер и журнал подменены.
+     */
+    let rendered = 0
+    const wrote: string[] = []
+    let frameCb: ((t: number) => void) | null = null
+    const a = app({
+      raf: (cb) => {
+        frameCb = cb
+        return 1
+      },
+      renderer: () => ({
+        render: () => {
+          rendered++
+        },
+      }),
+      write: (e) => void wrote.push(e.type),
+    })
+    a.go('run')
+    expect(frameCb).not.toBeNull()
+
+    // Без отношения сторон кадра игра честно отказывается считать: ни одного
+    // кадра от камеры ещё не было.
+    frameCb!(0)
+    expect(rendered).toBe(0)
+    expect(a.runStage()).toBe('calibration')
+    // Журнал при этом не молчит об ошибках и не пишет лишнего.
+    expect(wrote).not.toContain('round.judge')
   })
 
   test('экран забега не показывает ни одной настройки', () => {

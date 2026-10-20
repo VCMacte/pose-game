@@ -24,6 +24,8 @@ import type { RunState } from '../../src/core/run'
 import { POSES } from '../../src/core/poses'
 import { stick } from '../../src/fake/stick'
 import { fakeSource } from '../../src/fake/player'
+import { makePlay } from '../../src/shell/play'
+import { makeSettings } from '../../src/adapters/settings'
 import type { FakeScript, FakeMarker } from '../../src/fake/player'
 import type { Frame } from '../../src/core/types'
 import { replay } from '../../tools/lib/replay'
@@ -64,10 +66,10 @@ type Row = Record<string, unknown>
  * Состав при этом ровно тот, что пишет оболочка, и это то, что сверяет replay.
  */
 async function playRun(opts: {
-  /** Сценарий синтетического игрока, либо `follow` — игрок, повторяющий позу. */
+  /** Сценарий синтетического игрока, либо ничего — игрок, повторяющий позу. */
   script?: FakeScript
   tier: 1 | 2 | 3
-}): Promise<{ state: RunState; log: Row[] }> {
+}): Promise<{ state: RunState; log: Row[]; scenes: number }> {
   const marks: FakeMarker[] = []
   /*
    * Темп подменён: забег на 90 ИГРОВЫХ секунд при настоящих паузах шёл бы те
@@ -78,47 +80,59 @@ async function playRun(opts: {
   const src = opts.script ? fakeSource(opts.script, HZ, (m) => marks.push(m), async () => {}) : null
 
   const log: Row[] = []
-  // Самомаркировка приходит синхронно, при создании источника, и попадает в
-  // журнал первой: забытая пометка означала бы синтетические числа,
-  // неотличимые от живых.
-  for (const m of marks) log.push({ t: 0, type: m.type, ...m.data })
+  const write = (e: { type: string; data: object }): void => {
+    log.push({ t: log.length, type: e.type, ...(e.data as Record<string, unknown>) })
+  }
+  // Самомаркировка приходит синхронно, при создании источника: забытая пометка
+  // означала бы синтетические числа, неотличимые от живых.
+  for (const m of marks) write(m)
 
-  const strict = strictness('normal')
-  log.push({
-    t: 0,
-    type: 'run.start',
-    tier: opts.tier,
-    durationS: DURATION_S,
-    strict,
-    latencyMs: 0,
-    source: 'fake',
-  })
-  log.push({ t: 0, type: 'calib.done', ...CAL })
+  /** Кольцо строк скелета: его же ведёт журнал в бою. */
+  const ring: Array<{ t: number; v: number[] }> = []
 
-  const run = makeRun({
-    startT: 0,
-    durationSec: DURATION_S,
-    tier: opts.tier,
-    toggles: {},
-    rnd: makeRnd(1),
+  const settings = makeSettings({ store: memStore() })
+  settings.set('tier', opts.tier)
+  settings.set('durationSec', DURATION_S)
+  // Сдвиг на задержку ноль: синтетический игрок встаёт в позу мгновенно, и
+  // ненулевой сдвиг уводил бы окно в кадры, которых у него нет.
+  settings.set('latencyMs', 0)
+
+  /*
+   * ЗАБЕГ ВЕДЁТ `makePlay` — тот самый код, что ведёт его в игре, вместе с его
+   * порядком записи в журнал. Прежняя версия этого теста писала журнал сама, и
+   * потому проверяла свой писатель, а не оболочкин: порядок событий, состав
+   * полей и согласие с replay были гарантированы только внутри теста.
+   */
+  const play = makePlay({
+    settings,
     cal: CAL,
-    strict,
-    // Сдвиг на задержку ноль: синтетический игрок встаёт в позу мгновенно, и
-    // ненулевой сдвиг сдвигал бы окно в кадры, которых у него нет.
-    timings: { previewMs: 2000, wallMs: 2000, latencyMs: 0, verdictMs: 800 },
+    aspect: () => ASPECT,
+    write,
+    rnd: makeRnd(1),
+    wall: () => 1_760_000_000_000,
+    cameraId: 'fake-cam',
+    /*
+     * Пометка ОБЯЗАТЕЛЬНА по типу: вызов без неё не компилируется. Забытая
+     * пометка означала бы синтетические числа, сидящие в журнале неотличимо
+     * от живых, — калибровка по такому журналу хуже отсутствующей.
+     */
+    source: 'fake',
+    // Сплошная запись скелета: ею и снимают данные для калибровки порогов, и
+    // без неё зачтённые раунды не имеют строк, а значит не пересчитываются.
+    rawAlways: true,
+    raw: {
+      push: (t, lm) => {
+        if (lm) ring.push({ t: Math.round(t), v: Array.from(lm, (x) => Math.round(x * 1000) / 1000) })
+      },
+      burst: (why) => {
+        if (ring.length === 0) return
+        write({ type: 'raw', data: { why, lines: ring.splice(0) } })
+      },
+      reset: () => void ring.splice(0),
+    },
   })
 
-  /** Уже записанные раунды: по ним видно, какой исход только что добавился. */
-  let logged = 0
-  /** Строки скелета текущего раунда — всплеск уходит в журнал при приговоре. */
-  let lines: Array<{ t: number; v: number[] }> = []
-  /** Чей раунд уже озаглавлен превью. Опознаётся по НАЧАЛУ раунда, не по позе:
-      одна и та же поза вернётся через несколько раундов. */
-  let previewedAt: number | null = null
-  /** Причина паузы, уже записанная: иначе строка пишется на каждый кадр. */
-  let pausedWhy: string | null = null
-
-  let state = run.state
+  let scenes = 0
   const iter = src ? src[Symbol.asyncIterator]() : null
 
   /*
@@ -128,7 +142,7 @@ async function playRun(opts: {
    * так что потребитель обязан иметь свой предел.
    */
   for (let i = 0; i < MAX_FRAMES; i++) {
-    if (state.phase === 'finished') break
+    if (play.state()?.phase === 'finished') break
 
     let frame: Frame
     if (iter) {
@@ -141,18 +155,13 @@ async function playRun(opts: {
        * Сценарии `fakeSource` для этого не годятся: `hit` всегда изображает
        * «Звезду», а выбор поз не повторяет предыдущую, так что «все раунды
        * зачтены» через фиксированное тело недостижимо в принципе.
+       *
+       * Ориентация берётся из `orientation` ПОЗЫ, а не из `requires`: в
+       * `PoseSpec` это отдельное поле. Без этого «верный» игрок стоял бы
+       * фронтом в профильных раундах, и те выходили бы НЕСУДИМЫМИ.
        */
       const t = i * (1000 / HZ)
-      const pose = state.pose
-      /*
-       * Ориентация берётся из `orientation` ПОЗЫ, а не из `requires`: в
-       * `PoseSpec` это отдельное поле, и в `requires` его нет. Фигура позы
-       * (`core/figure.ts`) собирает кинематику точно так же — `requires` плюс
-       * `orientation` плюс сторона взгляда. Без этого «верный» игрок стоял бы
-       * фронтом в профильных раундах, присутствие отказывало бы по
-       * `orientation`, и раунд выходил бы НЕСУДИМЫМ — что и случилось: ровно
-       * три раунда из девятнадцати, по числу профильных поз ступени 3.
-       */
+      const pose = play.state()?.pose
       frame = {
         t,
         lm: stick({
@@ -164,90 +173,34 @@ async function playRun(opts: {
       }
     }
 
-    state = run.tick(frame.t, [frame])
-
-    /*
-     * Приговоры сливаются В ЖУРНАЛ РАНЬШЕ превью следующего раунда, и порядок
-     * здесь — не вкус. К моменту появления исхода раунда N забег уже перешёл к
-     * раунду N+1, и превью N+1, записанное первым, уехало бы в журнал ПЕРЕД
-     * `round.wall` раунда N. Replay читает журнал по порядку и судил бы данные
-     * раунда N позой раунда N+1 — то есть расходился бы с игрой на каждом
-     * раунде, не имея при этом ни одного дефекта в судействе.
-     */
-    // Новые приговоры: по одному на раунд, в порядке их появления.
-    while (logged < state.outcomes.length) {
-      const o = state.outcomes[logged++]
-      log.push({ t: o.contactT, type: 'round.wall', travelMs: 2000, latencyShiftMs: 0 })
-      log.push({ t: o.contactT, type: 'raw', why: 'judge', lines })
-      lines = []
-
-      if (o.verdict === null) {
-        log.push({ t: o.contactT + 1, type: 'round.skip', why: o.why ?? 'pause', valid: 0 })
-        continue
-      }
-      log.push({
-        t: o.contactT + 1,
-        type: 'round.judge',
-        poseId: o.spec.id,
-        matched: o.verdict.matched,
-        frames: o.verdict.frames,
-        valid: o.verdict.valid,
-        ratio: o.verdict.ratio,
-        perAxis: { worst: null, axes: {} },
-        score: scoreOf(o.kind),
-        total: state.score,
-      })
-    }
-
-    // Превью нового раунда: пишется один раз на раунд, уже после исходов.
-    if (state.round && state.round.startT !== previewedAt && state.pose) {
-      previewedAt = state.round.startT
-      log.push({
-        t: frame.t,
-        type: 'round.preview',
-        poseId: state.pose.id,
-        mirror: state.pose.mirror,
-        orientation: state.pose.orientation,
-        requires: state.pose.requires,
-        tier: state.pose.tier,
-      })
-    }
-
-    // Строки скелета копятся всегда: какие из них попадут в окно, решает судья.
-    if (frame.lm) {
-      lines.push({ t: Math.round(frame.t), v: Array.from(frame.lm, (x) => Math.round(x * 1000) / 1000) })
-    }
-
-    // Пауза пишется на ПЕРЕХОДЕ, а не на каждом кадре: иначе одна потеря
-    // игрока даёт в журнале тысячу одинаковых строк и съедает его потолок.
-    if (state.pauseWhy !== null && state.pauseWhy !== pausedWhy) {
-      pausedWhy = state.pauseWhy
-      log.push({ t: frame.t, type: 'pause', why: state.pauseWhy })
-    }
-    if (state.pauseWhy === null) pausedWhy = null
-    // Ядро само с паузы не уходит: оболочка обязана подтвердить возврат.
-    if (state.pauseWhy !== null && state.canResume) state = run.resume(frame.t)
-
+    const got = play.step(frame.t, [frame])
+    if (got.scene) scenes++
   }
 
-  const kinds = state.outcomes.map((o) => o.kind)
-  log.push({
-    t: state.elapsedMs,
-    type: 'run.finish',
-    score: state.score,
-    rounds: state.outcomes.length,
-    hits: kinds.filter((k) => k === 'hit').length,
-    misses: kinds.filter((k) => k === 'miss').length,
-    skipped: kinds.filter((k) => k === 'skip').length,
-    tier: opts.tier,
-    durationS: DURATION_S,
-  })
-
-  return { state, log }
+  const state = play.state()
+  /*
+   * Калибровка подана готовой, значит забег обязан был начаться. `null` здесь
+   * означал бы, что он не начался вовсе — и все проверки ниже судили бы о
+   * пустоте, молча проходя.
+   */
+  if (!state) throw new Error('забег не начался: play.state() === null')
+  return { state, log, scenes }
 }
 
-const scoreOf = (kind: 'hit' | 'miss' | 'skip'): number =>
-  kind === 'hit' ? CONFIG.score.hit : kind === 'miss' ? CONFIG.score.miss : 0
+/** Хранилище настроек в памяти: забеги не должны течь друг в друга. */
+function memStore(): Storage {
+  const m = new Map<string, string>()
+  return {
+    get length() {
+      return m.size
+    },
+    clear: () => m.clear(),
+    getItem: (k: string) => m.get(k) ?? null,
+    key: (i: number) => [...m.keys()][i] ?? null,
+    removeItem: (k: string) => void m.delete(k),
+    setItem: (k: string, v: string) => void m.set(k, v),
+  } as Storage
+}
 
 /** Детерминированный генератор: чистота забега держится на нём. */
 function makeRnd(seed: number): () => number {

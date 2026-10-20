@@ -16,10 +16,16 @@
 import type { Audio } from '../adapters/audio'
 import { createRenderer } from '../adapters/render/canvas'
 import type { Renderer } from '../adapters/render/canvas'
+import { frameAspect } from '../adapters/camera'
+import type { AspectSource } from '../adapters/camera'
+import { write as journalWrite } from '../adapters/log/store'
+import type { LogEvent } from '../adapters/log/store'
 import { makeSettings, timingsFor, toggleBlocked } from '../adapters/settings'
 import type { Settings } from '../adapters/settings'
-import type { PoseTag } from '../core/types'
+import type { Calibration, PoseTag } from '../core/types'
 import { makeLoop } from './loop'
+import { makePlay } from './play'
+import type { Play } from './play'
 import type { Loop } from './loop'
 import { menuScreen } from './screens/menu'
 import { runScreen } from './screens/run'
@@ -43,6 +49,15 @@ export type AppDeps = {
   serviceInfo?: () => ServiceInfo
   /** Лучшие результаты. Снаружи же, по той же причине. */
   best?: () => { allTime: number; last: number }
+  /** Куда писать журнал. По умолчанию — журнал приложения. */
+  write?: (e: LogEvent) => void
+  /** Генератор случайных чисел забега. По умолчанию `Math.random`. */
+  rnd?: () => number
+  /** Замер задержки тракта — кнопка служебного экрана. */
+  measureLatency?: () => Promise<{ medianMs: number; spreadMs: number } | null>
+  /** Выгрузка и очистка журнала — кнопки служебного экрана. */
+  saveLog?: () => Promise<void>
+  clearLog?: () => Promise<void>
 }
 
 export type App = {
@@ -55,6 +70,8 @@ export type App = {
   /** Заблокирован ли тумблер словаря: то же, что показывает интерфейс. */
   blockedToggle(tag: string): boolean
   readonly settings: Settings
+  /** Последний замер задержки, если он был: его показывает служебный экран. */
+  readonly latency: { medianMs: number; spreadMs: number } | null
   stop(): void
 }
 
@@ -73,12 +90,21 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   const best = deps.best ?? ((): { allTime: number; last: number } => ({ allTime: 0, last: 0 }))
 
   let screen: ScreenName = 'menu'
+  let latency: { medianMs: number; spreadMs: number } | null = null
   let stopped = false
   let rafId: number | null = null
   let stage: RunStage | null = null
   let loop: Loop | null = null
   let rs: RunScreen | null = null
-  const debug: Debug = { source: 'камера', pipeline: 'авто' }
+  let play: Play | null = null
+  /**
+   * Калибровка ПЕРЕЖИВАЕТ забег и живёт в оболочке, а не в забеге: ребёнок не
+   * должен сдавать её каждый раз. Устаревание решает `makePlay`.
+   */
+  let calibration: Calibration | null = null
+  /** Источники отношения сторон кадра. Пополняются источником позы. */
+  const aspectSource: AspectSource = {}
+  const debug: Debug & { rawAlways?: boolean } = { source: 'камера', pipeline: 'авто' }
 
   /** Гасит такт экрана. Иначе два забега подряд дают два живых цикла rAF. */
   const stopFrames = (): void => {
@@ -88,18 +114,13 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     }
     loop = null
     rs = null
+    play = null
     stage = null
   }
 
   function startFrames(): void {
     const screenRun = runScreen()
     rs = screenRun
-    /*
-     * Калибровка — ПЕРВАЯ стадия забега, а не отдельный экран и не кнопка в
-     * меню. Нет калибровки или она устарела — забег начинается с неё сам.
-     */
-    stage = 'calibration'
-    screenRun.say('Встань прямо и постой пять секунд')
 
     let renderer: Renderer | null = null
     try {
@@ -112,16 +133,33 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
       screenRun.say('Рисовать нечем: холст недоступен')
     }
 
+    /*
+     * Калибровка — ПЕРВАЯ стадия забега, а не отдельный экран и не кнопка в
+     * меню. Решает это `makePlay`: нет калибровки или она устарела — забег
+     * начинается с неё сам, и оболочка о сроках устаревания не знает.
+     */
+    const thePlay = makePlay({
+      settings,
+      cal: calibration,
+      aspect: () => frameAspect(aspectSource),
+      write: deps.write ?? journalWrite,
+      rnd: deps.rnd ?? Math.random,
+      source: debug.source === 'фейк' ? 'fake' : 'camera',
+      ...(debug.rawAlways ? { rawAlways: true } : {}),
+    })
+    play = thePlay
+    stage = thePlay.stage()
+
     const theLoop = makeLoop({
-      step: () => {
-        /*
-         * Здесь встанет `run.tick(t, frames)` и `renderer.render(scene)`, когда
-         * забег подключат к источнику позы (задача 21). Разделение такта уже
-         * на месте и уже под тестом: кадр камеры только кладёт кадр в буфер,
-         * кадр экрана его забирает.
-         */
-        void renderer
-        return { valid: 0, lost: 0 }
+      step: (t, frames) => {
+        const got = thePlay.step(t, frames)
+        stage = thePlay.stage()
+        screenRun.say(thePlay.hint())
+        // Сцена `null` — рисовать нечего (идёт калибровка или нет кадра).
+        if (got.scene && renderer) renderer.render(got.scene)
+        // Снятая калибровка переживает забег: ребёнок не сдаёт её каждый раз.
+        calibration = thePlay.calibration()
+        return got.counts
       },
     })
     loop = theLoop
@@ -171,14 +209,29 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     root.replaceChildren(
       serviceScreen({
         settings,
-        info: serviceInfo(),
+        info: { ...serviceInfo(), latency },
         debug,
         onDebug: (patch) => Object.assign(debug, patch),
         onBack: () => go('menu'),
-        onMeasureLatency: () => {},
-        onShareLog: () => {},
-        onClearLog: () => {},
-        onRecalibrate: () => {},
+        /*
+         * Кнопки служебного экрана ДЕЛАЮТ дело, а не стоят заглушками: кнопка,
+         * которая нажимается и ничего не меняет, выглядит сломанной игрой — и
+         * отличить её от сломанной нечем, консоли на штативе нет.
+         */
+        onMeasureLatency: () => {
+          void (deps.measureLatency ?? (() => Promise.resolve(null)))().then((r) => {
+            latency = r
+            draw()
+          })
+        },
+        onShareLog: () => void (deps.saveLog ?? (() => Promise.resolve()))().then(draw),
+        onClearLog: () => void (deps.clearLog ?? (() => Promise.resolve()))().then(draw),
+        onRecalibrate: () => {
+          // Пересдача — это просто забытая калибровка: следующий забег начнётся
+          // со стадии калибровки сам.
+          calibration = null
+          draw()
+        },
         refresh: draw,
       }),
     )
@@ -194,9 +247,12 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
 
   return {
     screen: () => screen,
+    get latency() {
+      return latency
+    },
     go,
     orientation: () => (screen === 'run' ? 'landscape' : 'portrait'),
-    runStage: () => stage,
+    runStage: () => play?.stage() ?? stage,
     blockedToggle: (tag) => toggleBlocked(settings, tag as PoseTag),
     settings,
     stop: () => {
