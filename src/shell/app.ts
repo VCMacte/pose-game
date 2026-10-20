@@ -180,6 +180,9 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
      * меню. Решает это `makePlay`: нет калибровки или она устарела — забег
      * начинается с неё сам, и оболочка о сроках устаревания не знает.
      */
+    // Громкость — живая настройка, как и всё остальное: применяется на забеге.
+    deps.audio?.setVolume(settings.get('volume'))
+
     const thePlay = makePlay({
       settings,
       cal: calibration,
@@ -187,6 +190,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
       write: deps.write ?? journalWrite,
       rnd: deps.rnd ?? Math.random,
       source: debug.source === 'фейк' ? 'fake' : 'camera',
+      ...(deps.audio ? { audio: deps.audio } : {}),
       ...(debug.rawAlways ? { rawAlways: true } : {}),
     })
     play = thePlay

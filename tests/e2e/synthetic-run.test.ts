@@ -69,6 +69,8 @@ async function playRun(opts: {
   /** Сценарий синтетического игрока, либо ничего — игрок, повторяющий позу. */
   script?: FakeScript
   tier: 1 | 2 | 3
+  /** Звук исходов, если его проверяют. */
+  audio?: { cue(): void; hit(): void; miss(): void; neutral(): void }
 }): Promise<{ state: RunState; log: Row[]; scenes: number }> {
   const marks: FakeMarker[] = []
   /*
@@ -117,6 +119,7 @@ async function playRun(opts: {
      * от живых, — калибровка по такому журналу хуже отсутствующей.
      */
     source: 'fake',
+    ...(opts.audio ? { audio: opts.audio } : {}),
     // Сплошная запись скелета: ею и снимают данные для калибровки порогов, и
     // без неё зачтённые раунды не имеют строк, а значит не пересчитываются.
     rawAlways: true,
@@ -323,5 +326,43 @@ describe('replay сверяется с живыми приговорами', () 
     expect(judged.length).toBeGreaterThan(0)
     judged[0].score = CONFIG.score.miss
     expect(replay(dumpOf(log)).mismatches).toBe(1)
+  })
+})
+
+describe('звук исходов', () => {
+  test('мотив звучит на КАЖДОМ раунде и по его исходу', async () => {
+    /*
+     * Созданный, но ни разу не зазвучавший звук — ровно тот дефект «выглядит
+     * работающим и не работает», что уже находился в этом проекте трижды.
+     */
+    const heard: string[] = []
+    const audio = {
+      cue: () => heard.push('cue'),
+      hit: () => heard.push('hit'),
+      miss: () => heard.push('miss'),
+      neutral: () => heard.push('neutral'),
+    }
+    const { state } = await playRun({ tier: 3, audio })
+
+    const hits = heard.filter((x) => x === 'hit').length
+    const cues = heard.filter((x) => x === 'cue').length
+    expect(hits).toBe(state.outcomes.filter((o) => o.kind === 'hit').length)
+    expect(cues).toBe(state.outcomes.length)
+    expect(heard).not.toContain('miss')
+  })
+
+  test('несудимый раунд звучит НЕ как провал', async () => {
+    // Тот же инвариант, что у цвета стены: ребёнок не должен услышать провал
+    // за раунд, которого игра не судила.
+    const heard: string[] = []
+    const audio = {
+      cue: () => heard.push('cue'),
+      hit: () => heard.push('hit'),
+      miss: () => heard.push('miss'),
+      neutral: () => heard.push('neutral'),
+    }
+    await playRun({ script: 'leave-frame', tier: 1, audio })
+    expect(heard).not.toContain('miss')
+    expect(heard).not.toContain('hit')
   })
 })

@@ -7,7 +7,7 @@
  */
 
 /** Версия кода: меняется каждой сборкой, вместе с именем кэша кода. */
-export const CODE_VERSION = '20261020-0843'
+export const CODE_VERSION = '20261020-0845'
 
 /**
  * Версия вендора. Поднимается ОТДЕЛЬНО (`node tools/make-sw.mjs --vendor`):
@@ -19,11 +19,11 @@ export const VENDOR_VERSION = '1'
 /** Файлы кода для офлайн-кэша — ровно то, что сделала сборка. */
 export const CODE_FILES = Object.freeze([
   '/',
-  '/assets/index-Cw05yovJ.js',
-  '/assets/latency-D_FYteps.js',
-  '/assets/mic-CgDyMc4z.js',
-  '/assets/source-C2rkmUxz.js',
-  '/assets/sw-DgU6KoNO.js',
+  '/assets/index-bzn-Mszt.js',
+  '/assets/latency-CAOSgAIT.js',
+  '/assets/mic-Dq1iZgYd.js',
+  '/assets/source-C-K29x5V.js',
+  '/assets/sw-D4iuVTEK.js',
   '/assets/worker-GqN618hL.js',
   '/icon.svg',
   '/manifest.webmanifest',

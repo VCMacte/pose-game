@@ -29,6 +29,7 @@ import type { LogEvent, RawWhy } from '../adapters/log/store'
 import { rawBurst, rawPush, rawReset } from '../adapters/log/store'
 import { timingsFor } from '../adapters/settings'
 import type { Settings } from '../adapters/settings'
+import type { Audio } from '../adapters/audio'
 import type { Scene } from '../adapters/render/canvas'
 import type { StepCounts } from './loop'
 import type { RunStage } from './screens/run'
@@ -54,6 +55,11 @@ export type PlayDeps = {
    * пометку МОЖНО, а забытая пометка неотличима от правды.
    */
   source: 'camera' | 'fake'
+  /**
+   * Звук исходов. Необязателен: беззвучная игра хуже звучащей, но несравнимо
+   * лучше упавшей, и `createAudio` сам уже молчит, когда WebAudio нет.
+   */
+  audio?: Pick<Audio, 'cue' | 'hit' | 'miss' | 'neutral'>
   /** Куда складывать строки скелета. По умолчанию — кольцо журнала. */
   raw?: RawSink
   /**
@@ -110,6 +116,14 @@ export function makePlay(deps: PlayDeps): Play {
   /** Записанная причина паузы: иначе строка пишется на каждый кадр. */
   let pausedWhy: string | null = null
   let finished = false
+
+  /** Мотив исхода. `skip` звучит НЕ как провал — тот же инвариант, что у цвета. */
+  const sound = (kind: 'hit' | 'miss' | 'skip'): void => {
+    if (!deps.audio) return
+    if (kind === 'hit') deps.audio.hit()
+    else if (kind === 'miss') deps.audio.miss()
+    else deps.audio.neutral()
+  }
 
   const raw: RawSink = deps.raw ?? {
     push: (t, lm) => rawPush(t, lm),
@@ -251,6 +265,10 @@ export function makePlay(deps: PlayDeps): Play {
       if (o.kind !== 'hit') raw.burst('miss')
       else if (deps.rawAlways) raw.burst('debug')
 
+      // Мотив — на исходе, один раз на раунд: ребёнок 7 лет различает
+      // направление мотива раньше, чем читает счёт.
+      sound(o.kind)
+
       if (o.verdict === null) {
         write(roundSkip({ why: o.why === 'pause' ? 'pause' : 'fewFrames', valid: 0 }))
         continue
@@ -271,6 +289,8 @@ export function makePlay(deps: PlayDeps): Play {
 
     if (st.round && st.round.startT !== previewedAt && st.pose) {
       previewedAt = st.round.startT
+      // Нота-подсказка на старте превью: «смотри, вот поза».
+      deps.audio?.cue()
       write(
         roundPreview({
           poseId: st.pose.id,
