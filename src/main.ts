@@ -10,3 +10,19 @@ import { startApp } from './shell/app'
 
 const root = document.getElementById('app')
 if (root) startApp(root)
+
+/*
+ * Регистрация service worker — ПОСЛЕ запуска приложения и без ожидания: офлайн
+ * это запас на следующий раз, а не условие сегодняшнего запуска. Отказ
+ * регистрации (нет https, выключены service worker'ы) игру не задевает: она
+ * играется из сети.
+ *
+ * В dev worker не регистрируется вовсе — `import.meta.env.DEV`: иначе
+ * закэшированная сборка перебивала бы правки, и каждая из них требовала бы
+ * сброса данных в браузере.
+ */
+if (!import.meta.env.DEV && 'serviceWorker' in navigator) {
+  void navigator.serviceWorker.register('/sw.js', { type: 'module' }).catch(() => {
+    // Офлайна не будет; из сети игра идёт.
+  })
+}

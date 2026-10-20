@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="Стена с позами">
+  <!--
+    Иконка — та же мысль, что и в игре: стена с вырезом по фигуре. SVG, а не
+    PNG, потому что `purpose: maskable` требует запаса по краям, и один вектор
+    покрывает все размеры без набора файлов.
+  -->
+  <rect width="512" height="512" fill="#0b1020" />
+  <rect x="96" y="96" width="320" height="320" rx="24" fill="#8d96b5" />
+  <!-- Вырез: фигура толстым штрихом с круглыми концами, как в самой игре. -->
+  <g
+    fill="none"
+    stroke="#0b1020"
+    stroke-width="46"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="M256 236 V320" />
+    <path d="M210 236 H302" />
+    <path d="M210 320 H302" />
+    <path d="M210 236 L150 180" />
+    <path d="M302 236 L362 180" />
+    <path d="M210 320 L196 390" />
+    <path d="M302 320 L316 390" />
+  </g>
+  <circle cx="256" cy="186" r="34" fill="#0b1020" />
+</svg>
