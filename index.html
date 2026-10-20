@@ -2,10 +2,168 @@
 <html lang="ru">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>pose-game</title>
+    <!--
+      `user-scalable=no` и фиксированный масштаб: игра на штативе, и случайный
+      зум двумя пальцами по экрану забега уводит картинку, которую не вернуть
+      не трогая телефон.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="theme-color" content="#0b1020" />
+    <title>Стена с позами</title>
+    <style>
+      /*
+        Вёрстка экранов — CSS, покадровый путь — Canvas. Пересечения нет:
+        подсказки и кнопки меняются раз в секунды, кадр стены — 40 раз в
+        секунду, и платить за кадр перерисовкой DOM нечем.
+      */
+      :root {
+        --bg: #0b1020;
+        --fg: #ffffff;
+        --dim: #8d96b5;
+        --accent: #3ddc84;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        background: var(--bg);
+        color: var(--fg);
+        font: 700 4vmin/1.3 system-ui, sans-serif;
+        /* Выделение текста пальцем на штативе — только помеха. */
+        -webkit-user-select: none;
+        user-select: none;
+        overscroll-behavior: none;
+      }
+
+      #app,
+      .screen {
+        height: 100%;
+      }
+
+      .screen {
+        display: flex;
+        flex-direction: column;
+        gap: 2vmin;
+        padding: 3vmin;
+        overflow-y: auto;
+      }
+
+      .top {
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      button {
+        font: inherit;
+        color: var(--fg);
+        background: #1b2340;
+        border: 0.4vmin solid #2a3a63;
+        border-radius: 1.2vmin;
+        padding: 2vmin 3vmin;
+        /* Палец ребёнка: цель не меньше 12 мм по короткой стороне. */
+        min-height: 12vmin;
+        min-width: 12vmin;
+      }
+
+      button[disabled] {
+        opacity: 0.4;
+      }
+
+      button.on {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      /* Вход на экраны взрослого: обычная кнопка, без ритуалов. */
+      .adult {
+        min-width: 14vmin;
+      }
+
+      .play {
+        flex: 1 1 auto;
+        font-size: 12vmin;
+        color: var(--bg);
+        background: var(--accent);
+        border-color: var(--accent);
+      }
+
+      .best {
+        color: var(--dim);
+        text-align: center;
+      }
+
+      .choice {
+        display: flex;
+        gap: 2vmin;
+        flex-wrap: wrap;
+      }
+
+      h1 {
+        font-size: 6vmin;
+        margin: 0;
+      }
+
+      h2 {
+        font-size: 4.5vmin;
+        margin: 0;
+      }
+
+      h3 {
+        font-size: 3.5vmin;
+        margin: 2vmin 0 0;
+        color: var(--dim);
+      }
+
+      .group {
+        display: flex;
+        flex-direction: column;
+        gap: 1vmin;
+        border-top: 0.3vmin solid #2a3a63;
+        padding-top: 2vmin;
+      }
+
+      /* Экран забега: холст во весь экран, подсказка поверх него. */
+      .screen.run {
+        padding: 0;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .screen.run canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+        /* Буфер фиксированно 1280×720; растягивает его браузер. */
+        object-fit: contain;
+      }
+
+      .hint {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 6vmin;
+        text-align: center;
+        font-size: 5vmin;
+        text-shadow: 0 0 2vmin #000;
+      }
+
+      small {
+        color: var(--dim);
+        font-weight: 400;
+        font-size: 3vmin;
+      }
+    </style>
   </head>
   <body>
     <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
