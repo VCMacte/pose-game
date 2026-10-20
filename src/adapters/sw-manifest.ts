@@ -10,7 +10,7 @@
 export const BASE = '/pose-game/'
 
 /** Версия кода: меняется каждой сборкой, вместе с именем кэша кода. */
-export const CODE_VERSION = '20261020-0939'
+export const CODE_VERSION = '20261020-0942'
 
 /**
  * Версия вендора. Поднимается ОТДЕЛЬНО (`node tools/make-sw.mjs --vendor`):
@@ -22,11 +22,11 @@ export const VENDOR_VERSION = '1'
 /** Файлы кода для офлайн-кэша — ровно то, что сделала сборка. */
 export const CODE_FILES = Object.freeze([
   '/pose-game/',
-  '/pose-game/assets/index-BkEeiPPF.js',
-  '/pose-game/assets/latency-Cz9iv6dy.js',
-  '/pose-game/assets/mic-qQs9A0jE.js',
-  '/pose-game/assets/source-Chp9rBZf.js',
-  '/pose-game/assets/sw-BsZSiE03.js',
+  '/pose-game/assets/index-DW2m48MO.js',
+  '/pose-game/assets/latency-4xXXVmhs.js',
+  '/pose-game/assets/mic-BQHKidpA.js',
+  '/pose-game/assets/source-BSQQV8ln.js',
+  '/pose-game/assets/sw-Ddfu22-q.js',
   '/pose-game/assets/worker-GqN618hL.js',
   '/pose-game/icon.svg',
   '/pose-game/manifest.webmanifest',
