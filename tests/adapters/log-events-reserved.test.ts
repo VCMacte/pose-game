@@ -123,6 +123,7 @@ const EVENT_CTOR_NAMES = exactEventCtorNames([
   'poseBoot',
   'poseError',
   'posePipelineDown',
+  'latencyMeasured',
   'calibDone',
   'calibNeed',
   'calibStale',
@@ -135,7 +136,7 @@ describe('конструкторы событий не заводят зарез
     // `never` — именно то, что старый рантайм-подсчёт по `typeof v ===
     // 'function'` поймать не мог, потому что считал чужие экспорты, а не
     // отобранное из них типом подмножество.
-    expect(EVENT_CTOR_NAMES.length).toBe(26)
+    expect(EVENT_CTOR_NAMES.length).toBe(27)
 
     const names = Object.entries(ev)
       .filter(([, v]) => typeof v === 'function')

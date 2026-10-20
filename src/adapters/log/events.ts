@@ -336,6 +336,33 @@ export const posePipelineDown = (d: PosePipelineDownData): Of<'pose.pipeline.dow
   data: d,
 })
 
+/**
+ * Итог замера задержки тракта.
+ *
+ * `ok: false` пишется ТОЖЕ, и это не формальность: неудавшийся замер — самый
+ * интересный случай для разбора. Без записи он выглядел бы в журнале как «не
+ * мерили», а на самом деле мерили и не услышали — то есть телевизор был
+ * приглушён или микрофон не дал разрешения.
+ *
+ * **Записанного звука здесь нет и быть не может** — только числа. Игра про
+ * ребёнка в его комнате, и запись из неё не уходит.
+ */
+export type LatencyMeasuredData = {
+  ok: boolean
+  /** Выстрелов в серии. */
+  shots: number
+  /** Из них услышано. */
+  heard: number
+  medianMs?: number
+  spreadMs?: number
+  message?: string
+}
+
+export const latencyMeasured = (d: LatencyMeasuredData): Of<'latency.measured', LatencyMeasuredData> => ({
+  type: 'latency.measured',
+  data: d,
+})
+
 // ───────────────────────── калибровка ─────────────────────────
 
 /**
