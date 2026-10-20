@@ -87,7 +87,14 @@ if (root) {
    * перебивала бы правки, и каждая из них требовала бы сброса данных.
    */
   if (!import.meta.env.DEV && 'serviceWorker' in navigator) {
-    void navigator.serviceWorker.register('/sw.js', { type: 'module' }).catch(() => {
+    /*
+     * Адрес и область worker'а — от БАЗОВОГО пути сборки, а не от корня: на
+     * GitHub Pages проект живёт по `/<имя-репозитория>/`, и корневой `/sw.js`
+     * там не только не существует, но и не имел бы права управлять страницей
+     * (область worker'а не может быть шире его собственного каталога).
+     */
+    const base = import.meta.env.BASE_URL
+    void navigator.serviceWorker.register(`${base}sw.js`, { type: 'module', scope: base }).catch(() => {
       // Офлайна не будет; из сети игра идёт.
     })
   }

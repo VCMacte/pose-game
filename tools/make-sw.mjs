@@ -24,6 +24,16 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(ROOT, 'dist')
 const OUT = join(ROOT, 'src', 'adapters', 'sw-manifest.ts')
 
+/**
+ * Базовый путь публикации — из того же `base.json`, что читает сборка.
+ *
+ * Список кэша обязан быть в ТЕХ ЖЕ адресах, по которым страница просит файлы:
+ * на GitHub Pages проект живёт по `/<имя-репозитория>/`, и список с корневыми
+ * путями прекэшировал бы несуществующее. Своя копия пути здесь разъехалась бы
+ * со сборкой молча.
+ */
+const BASE = JSON.parse(readFileSync(join(ROOT, 'base.json'), 'utf8')).base
+
 /** Вендор живёт в своём кэше: эти префиксы из списка кода вычитаются. */
 const VENDOR_PREFIXES = ['vendor/', 'models/']
 
@@ -72,6 +82,9 @@ function writeManifest(urls, version, vendorVersion) {
     ' * Разбор, почему именно так: `docs/offline-and-build.md`.',
     ' */',
     '',
+    '/** Базовый путь публикации: с него начинается каждый адрес списка. */',
+    "export const BASE = '" + BASE + "'",
+    '',
     '/** Версия кода: меняется каждой сборкой, вместе с именем кэша кода. */',
     "export const CODE_VERSION = '" + version + "'",
     '',
@@ -113,26 +126,27 @@ function main() {
   }
 
   if (files === null) {
-    writeManifest(['/'], version, vendorVersion)
+    writeManifest([BASE], version, vendorVersion)
     console.log('sw-manifest: холостой режим (нет ' + relative(ROOT, DIST) + ') — только корень')
     return
   }
 
   const code = files
-    .map((f) => '/' + relative(DIST, f).split('\\').join('/'))
-    .filter((url) => !VENDOR_PREFIXES.some((p) => url.startsWith('/' + p)))
+    .map((f) => BASE + relative(DIST, f).split('\\').join('/'))
+    .filter((url) => !VENDOR_PREFIXES.some((p) => url.startsWith(BASE + p)))
     // `index.html` кэшируется как корень: офлайн открывают по `/`, а не по
     // имени файла, и без корня в списке приложение не стартует вовсе.
-    .filter((url) => url !== '/index.html')
+    .filter((url) => url !== BASE + 'index.html')
     /*
      * Сам worker в свой же кэш НЕ кладётся. Закэшированный worker отдаётся из
      * кэша и себя же обновить не может: приложение застревает на той сборке,
      * которая однажды установилась, и чинится только сбросом данных.
      */
-    .filter((url) => url !== '/sw.js')
+    .filter((url) => url !== BASE + 'sw.js')
     .sort()
 
-  const urls = ['/', ...code]
+  // Корень приложения — это сам базовый путь, а не `/`.
+  const urls = [BASE, ...code]
   writeManifest(urls, version, vendorVersion)
   console.log('sw-manifest: ' + urls.length + ' файлов кода, версия ' + version + ', вендор ' + vendorVersion)
 }

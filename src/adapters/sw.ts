@@ -15,7 +15,6 @@
  * Разбор: `docs/offline-and-build.md`.
  */
 
-import { CODE_FILES, CODE_VERSION, VENDOR_VERSION } from './sw-manifest'
 /*
  * Пути берутся из ЛИСТОВОГО модуля, а не из `pose/source`: оттуда в бандл
  * service worker'а уезжал весь конвейер позы, а с ним `log/store.ts`, где на
@@ -23,18 +22,27 @@ import { CODE_FILES, CODE_VERSION, VENDOR_VERSION } from './sw-manifest'
  */
 import { VENDOR } from './pose/vendor'
 
-export const BUILD = Object.freeze({
-  version: CODE_VERSION,
-  vendorVersion: VENDOR_VERSION,
-})
+/**
+ * Базовый путь — из окружения сборки, а не из генерируемого файла.
+ *
+ * Это не вкус: пока ЭТОТ модуль импортировал генерируемый список, от списка
+ * зависел бандл приложения, а список зависел от имён чанков этого бандла.
+ * Двухпроходная сборка переставала сходиться — первый проход называл одни
+ * имена, второй делал другие, и прекэш указывал на файлы, которых в сборке
+ * нет. Поймано тестом «каждый файл списка СУЩЕСТВУЕТ в сборке».
+ */
+const ENV = (import.meta as unknown as { env?: { BASE_URL?: string } }).env
+export const BASE = ENV?.BASE_URL ?? '/'
 
 /**
- * Имена кэшей НЕСУТ версию. Иначе обновление кода читало бы старый кэш, и
- * офлайн показывал бы прошлую сборку при свежем коде — дефект, который на
- * машине разработчика не воспроизводится вовсе.
+ * Версия сборки — подставляется сборщиком (`define` в `vite.config.ts`) из той
+ * же отметки, что получает генератор списка. Одна отметка на оба — иначе имя
+ * кэша и список разъехались бы.
  */
-export const CACHE = `pose-game-code-${BUILD.version}`
-export const VENDOR_CACHE = `pose-game-vendor-${BUILD.vendorVersion}`
+declare const __BUILD_VERSION__: string
+export const BUILD = Object.freeze({
+  version: typeof __BUILD_VERSION__ === 'string' ? __BUILD_VERSION__ : 'dev',
+})
 
 /**
  * Файлы вендора. Список известен заранее и из сборки НЕ выводится: это не
@@ -46,52 +54,21 @@ export const VENDOR_CACHE = `pose-game-vendor-${BUILD.vendorVersion}`
  *
  * Варианта wasm без SIMD здесь нет намеренно (ещё 10.5 МБ): поддержка
  * спрашивается предикатом самой библиотеки до запуска.
+ *
+ * Адреса начинаются с БАЗОВОГО ПУТИ, а не с `/`: на GitHub Pages проект живёт
+ * по `/<имя-репозитория>/`, и корневые пути прекэшировали бы несуществующее,
+ * а игра офлайн осталась бы без модели — молча и только у ребёнка.
  */
-export const VENDOR_FILES = Object.freeze([
-  `/${VENDOR.model}`,
-  `/${VENDOR.bundleClassic}`,
-  `/${VENDOR.bundleModule}`,
-  `/${VENDOR.wasmBase}/vision_wasm_internal.js`,
-  `/${VENDOR.wasmBase}/vision_wasm_internal.wasm`,
+export const VENDOR_FILES: readonly string[] = Object.freeze([
+  `${BASE}${VENDOR.model}`,
+  `${BASE}${VENDOR.bundleClassic}`,
+  `${BASE}${VENDOR.bundleModule}`,
+  `${BASE}${VENDOR.wasmBase}/vision_wasm_internal.js`,
+  `${BASE}${VENDOR.wasmBase}/vision_wasm_internal.wasm`,
 ])
 
-export type InstallResult = {
-  /** Наполнился ли кэш кода. */
-  code: boolean
-  /** Наполнился ли кэш вендора. */
-  vendor: boolean
-}
-
-/** Наполнить один кэш. Отказ возвращается, а не бросается. */
-async function fill(caches: CacheStorage, name: string, urls: readonly string[]): Promise<boolean> {
-  try {
-    const c = await caches.open(name)
-    await c.addAll([...urls])
-    return true
-  } catch {
-    /*
-     * Один недоступный файл валит весь `addAll` — так он и устроен. Поэтому
-     * отказ ЛОВИТСЯ здесь, на уровне одного кэша: брошенный наружу, он отменил
-     * бы установку service worker целиком, и приложение осталось бы вообще без
-     * офлайна и без объяснения.
-     */
-    return false
-  }
-}
-
-/**
- * Наполнить оба кэша. Независимо: отказ одного не мешает другому.
- *
- * Наружу не бросает НИКОГДА. Брошенное отсюда исключение отменяет установку
- * service worker, то есть превращает частичный офлайн в полное его отсутствие.
- */
-export async function install(caches: CacheStorage): Promise<InstallResult> {
-  const [code, vendor] = await Promise.all([
-    fill(caches, CACHE, CODE_FILES),
-    fill(caches, VENDOR_CACHE, VENDOR_FILES),
-  ])
-  return { code, vendor }
-}
+/** Корень приложения: он же базовый путь публикации, а не `/`. */
+export const ROOT_URL = BASE
 
 export type VendorCheck = { ok: boolean; missing: string[] }
 
@@ -138,18 +115,3 @@ export function buildInfo(): BuildInfo {
   return { version: BUILD.version, date }
 }
 
-/** Старые кэши: всё, что не нынешняя пара. */
-export async function dropOldCaches(caches: CacheStorage): Promise<string[]> {
-  const dropped: string[] = []
-  try {
-    for (const name of await caches.keys()) {
-      if (name === CACHE || name === VENDOR_CACHE) continue
-      if (!name.startsWith('pose-game-')) continue
-      await caches.delete(name)
-      dropped.push(name)
-    }
-  } catch {
-    // Не вышло убрать старое — не повод не работать на новом.
-  }
-  return dropped
-}

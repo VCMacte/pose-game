@@ -1,6 +1,8 @@
 import { resolve } from 'node:path'
 import { defineConfig } from 'vite'
 
+import base from './base.json'
+
 /**
  * Две точки входа: приложение и service worker.
  *
@@ -13,6 +15,23 @@ import { defineConfig } from 'vite'
  */
 export default defineConfig({
   root: '.',
+  /*
+   * Базовый путь берётся из `base.json` — ОДНОГО места, общего с генератором
+   * списка офлайн-кэша. GitHub Pages отдаёт проект по `/<имя-репозитория>/`, и
+   * две копии этого пути разъехались бы молча: приложение открылось бы, а
+   * офлайн искал бы файлы не там.
+   */
+  base: base.base,
+  /*
+   * Версия сборки подставляется ЗДЕСЬ, из той же отметки, что получает
+   * генератор списка (`tools/build.mjs` подаёт её обоим через `SW_VERSION`).
+   * Приложение читает её, не импортируя генерируемый файл, — иначе от списка
+   * зависел бы бандл приложения, а список от имён его чанков, и двухпроходная
+   * сборка не сходилась бы.
+   */
+  define: {
+    __BUILD_VERSION__: JSON.stringify(process.env.SW_VERSION ?? 'dev'),
+  },
   build: {
     rollupOptions: {
       input: {

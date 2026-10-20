@@ -437,6 +437,19 @@ describe('меню паузы', () => {
     expect(byTest('pause-menu')?.hidden).toBe(true)
   })
 
+  test('стиль не перебивает `hidden`: иначе меню видно при верном свойстве', () => {
+    /*
+     * Проверка по ИСХОДНИКУ стиля, а не по свойству элемента, и причина
+     * конкретная. Стиль браузера задаёт `[hidden] { display: none }` с
+     * наименьшим весом, и `.pause-menu { display: flex }` его перебивал: меню
+     * паузы висело поверх игры навсегда, при верном `hidden` у элемента.
+     * Тест на свойство это пропустил — в node нет раскладки, — и поймалось
+     * оно только запуском собранной страницы в браузере.
+     */
+    const html = readFileSync(join(__dirname, '..', '..', 'index.html'), 'utf8')
+    expect(html).toMatch(/\[hidden\]\s*\{[^}]*display:\s*none\s*!important/)
+  })
+
   test('в меню паузы есть «Продолжить» и «Вернуться в меню»', () => {
     running()
     expect(byTest('resume')).not.toBeNull()

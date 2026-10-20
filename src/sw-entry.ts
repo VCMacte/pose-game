@@ -11,7 +11,8 @@
  * Разбор: `docs/offline-and-build.md`.
  */
 
-import { CACHE, dropOldCaches, install } from './adapters/sw'
+import { ROOT_URL } from './adapters/sw'
+import { CACHE, dropOldCaches, install } from './adapters/sw-install'
 
 const sw = self as unknown as ServiceWorkerGlobalScope
 
@@ -74,7 +75,8 @@ sw.addEventListener('fetch', (e) => {
          * как успешно загруженный пустой файл.
          */
         if (req.mode === 'navigate') {
-          const root = await caches.match('/')
+          // Корень — базовый путь публикации, а не `/`: см. `ROOT_URL`.
+          const root = await caches.match(ROOT_URL)
           if (root) return root
         }
         return new Response('офлайн и в кэше нет', { status: 504 })

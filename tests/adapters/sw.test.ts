@@ -9,12 +9,18 @@
  *
  * Разбор: `docs/offline-and-build.md`.
  */
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 
-import { BUILD, CACHE, VENDOR_CACHE, VENDOR_FILES, buildInfo, checkVendor, install } from '../../src/adapters/sw'
-import { CODE_FILES } from '../../src/adapters/sw-manifest'
+import { VENDOR_FILES, buildInfo, checkVendor } from '../../src/adapters/sw'
+import { CACHE, VENDOR_CACHE, install } from '../../src/adapters/sw-install'
+import {
+  BASE as MANIFEST_BASE,
+  CODE_FILES,
+  CODE_VERSION,
+  VENDOR_VERSION,
+} from '../../src/adapters/sw-manifest'
 
 /** Поддельное хранилище кэшей: запоминает, что и в какой кэш положили. */
 function fakeCaches(opts: { failOn?: string; have?: Record<string, string[]> } = {}) {
@@ -121,14 +127,32 @@ describe('список кода ГЕНЕРИРУЕТСЯ', () => {
       return
     }
     for (const f of CODE_FILES) {
-      // Корень отдаётся из `index.html`: отдельного файла `/` в сборке нет.
-      const rel = f === '/' ? 'index.html' : f.slice(1)
+      // Корень отдаётся из `index.html`: отдельного файла для него в сборке нет.
+      const rel = f === MANIFEST_BASE ? 'index.html' : f.slice(MANIFEST_BASE.length)
       expect({ file: f, exists: existsSync(join(dist, rel)) }).toEqual({ file: f, exists: true })
     }
   })
 
   test('корень приложения в списке есть: без него офлайн не стартует', () => {
-    expect(CODE_FILES).toContain('/')
+    expect(CODE_FILES as readonly string[]).toContain(MANIFEST_BASE)
+  })
+
+  test('каждый адрес списка начинается с БАЗОВОГО пути публикации', () => {
+    /*
+     * GitHub Pages отдаёт проект по `/<имя-репозитория>/`. Список с корневыми
+     * путями прекэшировал бы несуществующее, и игра офлайн осталась бы без
+     * файлов — молча и только у ребёнка, то есть худшим здесь способом.
+     */
+    for (const f of CODE_FILES) expect(f.startsWith(MANIFEST_BASE)).toBe(true)
+  })
+
+  test('базовый путь взят из base.json, а не записан вторым разом', () => {
+    // Две копии пути разъехались бы молча: приложение открылось бы, а офлайн
+    // искал бы файлы не там.
+    const declared = JSON.parse(readFileSync(join(__dirname, '..', '..', 'base.json'), 'utf8')) as {
+      base: string
+    }
+    expect(MANIFEST_BASE).toBe(declared.base)
   })
 
   test('манифест и иконки в списке кода, а не вендора', () => {
@@ -189,13 +213,13 @@ describe('сведения о сборке', () => {
   test('версия и имена кэшей связаны: новая версия — новые кэши', () => {
     // Иначе обновление кода читало бы старый кэш и офлайн показывал бы
     // прошлую сборку при свежем коде.
-    expect(CACHE).toContain(BUILD.version)
-    expect(VENDOR_CACHE).toContain(BUILD.vendorVersion)
+    expect(CACHE).toContain(CODE_VERSION)
+    expect(VENDOR_CACHE).toContain(VENDOR_VERSION)
   })
 
   test('версия вендора отдельная от версии кода', () => {
     // Иначе каждая правка строки кода меняла бы имя кэша вендора, то есть
     // ровно та перекачка 17 МБ, от которой раздельность и спасает.
-    expect(BUILD.vendorVersion).not.toBe(BUILD.version)
+    expect(VENDOR_VERSION).not.toBe(CODE_VERSION)
   })
 })
