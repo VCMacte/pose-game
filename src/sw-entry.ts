@@ -11,7 +11,7 @@
  * Разбор: `docs/offline-and-build.md`.
  */
 
-import { CACHE, VENDOR_CACHE, dropOldCaches, install } from './adapters/sw'
+import { CACHE, dropOldCaches, install } from './adapters/sw'
 
 const sw = self as unknown as ServiceWorkerGlobalScope
 
@@ -82,7 +82,3 @@ sw.addEventListener('fetch', (e) => {
     })(),
   )
 })
-
-// Имя вендорного кэша упомянуто, чтобы сборщик не вычистил импорт: он нужен
-// `dropOldCaches`, который щадит именно нынешнюю пару.
-void VENDOR_CACHE

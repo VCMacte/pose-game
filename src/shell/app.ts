@@ -22,7 +22,7 @@ import { write as journalWrite } from '../adapters/log/store'
 import type { LogEvent } from '../adapters/log/store'
 import { makeSettings, timingsFor, toggleBlocked } from '../adapters/settings'
 import type { Settings } from '../adapters/settings'
-import type { Calibration, PoseTag } from '../core/types'
+import type { Calibration, Frame, PoseTag } from '../core/types'
 import { makeLoop } from './loop'
 import { makePlay } from './play'
 import type { Play } from './play'
@@ -58,6 +58,40 @@ export type AppDeps = {
   /** Выгрузка и очистка журнала — кнопки служебного экрана. */
   saveLog?: () => Promise<void>
   clearLog?: () => Promise<void>
+  /**
+   * Запуск источника позы. Приходит зависимостью и по умолчанию грузится
+   * ДИНАМИЧЕСКИ: этим семнадцать мегабайт вендора MediaPipe остаются за
+   * границей начального бандла, и меню открывается, не дожидаясь их.
+   */
+  startPose?: (opts: StartPoseOpts) => Promise<() => Promise<void>>
+}
+
+/** Что оболочка требует от источника позы. Подмножество `PoseSourceOpts`. */
+export type StartPoseOpts = {
+  source: 'camera' | 'fake'
+  onSample(f: Frame, meta: { w: number | null; h: number | null }): void
+  onStatus(s: { kind: string }): void
+  script?: string
+}
+
+/**
+ * Источник позы по умолчанию: динамический импорт вместе с камерой.
+ *
+ * Камера приходит в источник ЗАВИСИМОСТЬЮ (`openCamera`), а не импортом внутри
+ * него: источник знает, как ею пользоваться, но не решает, подключать ли её.
+ */
+async function defaultStartPose(opts: StartPoseOpts): Promise<() => Promise<void>> {
+  const [{ startPoseSource }, { openCamera }] = await Promise.all([
+    import('../adapters/pose/source'),
+    import('../adapters/camera'),
+  ])
+  return startPoseSource({
+    source: opts.source,
+    onSample: (f, meta) => opts.onSample(f, meta),
+    onStatus: (st) => opts.onStatus(st),
+    openCamera: () => openCamera(),
+    ...(opts.script !== undefined ? { script: opts.script } : {}),
+  })
 }
 
 export type App = {
@@ -97,6 +131,8 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   let loop: Loop | null = null
   let rs: RunScreen | null = null
   let play: Play | null = null
+  /** Как погасить источник позы. `null` — он ещё не поднялся или уже погашен. */
+  let stopPose: (() => Promise<void>) | null = null
   /**
    * Калибровка ПЕРЕЖИВАЕТ забег и живёт в оболочке, а не в забеге: ребёнок не
    * должен сдавать её каждый раз. Устаревание решает `makePlay`.
@@ -111,6 +147,12 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     if (rafId !== null) {
       cancelRaf(rafId)
       rafId = null
+    }
+    // Источник позы гасится ВМЕСТЕ с тактом экрана: оставленный жить, он
+    // держит камеру занятой, а индикатор — горящим при погашенной игре.
+    if (stopPose) {
+      void stopPose()
+      stopPose = null
     }
     loop = null
     rs = null
@@ -149,6 +191,38 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     })
     play = thePlay
     stage = thePlay.stage()
+
+    /*
+     * Источник позы поднимается ОДИН раз на забег и гасится вместе с ним.
+     * Кадры идут в буфер (`loop.sample`) и больше никуда: кадр камеры не
+     * рисует — это тот самый инвариант двух независимых тактов.
+     */
+    const startPose = deps.startPose ?? defaultStartPose
+    void startPose({
+      source: debug.source === 'фейк' ? 'fake' : 'camera',
+      onSample: (f, meta) => {
+        // Размер кадра — самый достоверный источник отношения сторон: именно
+        // по этому кадру и судили.
+        if (meta.w && meta.h) aspectSource.frame = { w: meta.w, h: meta.h }
+        theLoop.sample(f)
+      },
+      onStatus: (st) => {
+        if (st.kind === 'exhausted') screenRun.say('Камеры нет: позы не будет')
+        if (st.kind === 'camera-lost') screenRun.say('Камера пропала')
+        if (st.kind === 'beat') {
+          const b = st as unknown as { busyFrac: number; dropped: number; p50: number; p95: number }
+          theLoop.noteBeat({ p50: b.p50, p95: b.p95, dropped: b.dropped })
+        }
+      },
+    }).then(
+      (stop) => {
+        stopPose = stop
+        // Забег уже кончился, пока источник поднимался: гасим сразу, иначе
+        // камера осталась бы занятой при погашенном экране.
+        if (stopped || screen !== 'run') void stop()
+      },
+      () => screenRun.say('Источник позы не запустился'),
+    )
 
     const theLoop = makeLoop({
       step: (t, frames) => {

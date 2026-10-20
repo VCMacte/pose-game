@@ -42,6 +42,9 @@ function app(over: Parameters<typeof startApp>[1] = {}) {
     raf: () => 0,
     cancelRaf: () => {},
     now: () => 0,
+    // Источник позы подменён ВСЕГДА: по умолчанию он динамически грузит
+    // семнадцать мегабайт вендора MediaPipe, которых в node нет и быть не должно.
+    startPose: async () => async () => {},
     ...over,
   })
 }
@@ -330,5 +333,75 @@ describe('забег', () => {
       a.stop()
       a.stop()
     }).not.toThrow()
+  })
+})
+
+describe('источник позы', () => {
+  test('кадры идут в буфер, а не в рендер: такты независимы', async () => {
+    let rendered = 0
+    let sampled: Array<number> = []
+    let onSample: ((f: { t: number; lm: null }, m: { w: number; h: number }) => void) | null = null
+    const a = app({
+      renderer: () => ({ render: () => void rendered++ }),
+      startPose: async (opts) => {
+        onSample = opts.onSample as typeof onSample
+        return async () => {}
+      },
+    })
+    a.go('run')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(onSample).not.toBeNull()
+
+    // Три кадра камеры — и ни одной отрисовки: рисует только кадр экрана.
+    for (const t of [1, 2, 3]) {
+      onSample!({ t, lm: null }, { w: 640, h: 360 })
+      sampled.push(t)
+    }
+    expect(sampled.length).toBe(3)
+    expect(rendered).toBe(0)
+  })
+
+  test('уход с забега ГАСИТ источник позы', async () => {
+    // Оставленный жить источник держит камеру занятой, а индикатор — горящим
+    // при погашенной игре.
+    let stops = 0
+    const a = app({ startPose: async () => async () => void stops++ })
+    a.go('run')
+    await Promise.resolve()
+    await Promise.resolve()
+    a.go('menu')
+    expect(stops).toBe(1)
+  })
+
+  test('источник, поднявшийся ПОСЛЕ ухода с забега, гасится сразу', async () => {
+    /*
+     * Камера открывается не мгновенно (лестница ограничений, потолок на
+     * ступень). Ребёнок успевает уйти в меню, и поток приезжает в игру,
+     * которой он уже не нужен: погасить его больше некому.
+     */
+    let stops = 0
+    let resolve: ((stop: () => Promise<void>) => void) | null = null
+    const a = app({
+      startPose: () =>
+        new Promise((res) => {
+          resolve = res
+        }),
+    })
+    a.go('run')
+    a.go('menu')
+    resolve!(async () => void stops++)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(stops).toBe(1)
+  })
+
+  test('отказ источника называется вслух, а не молчит', async () => {
+    const a = app({ startPose: async () => Promise.reject(new Error('нет камеры')) })
+    a.go('run')
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(text()).toMatch(/не запустился|Камеры нет/)
   })
 })

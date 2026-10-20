@@ -208,10 +208,13 @@ function ratio(w: number | null | undefined, h: number | null | undefined): numb
  * отдать ни кадра, когда `video` уже отдал.
  */
 export function frameAspect(src: AspectSource): number | null {
+  // `getSettings()` спрашивается ОДИН раз: это обращение к дорожке, и два
+  // вызова в одном выражении могут вернуть разное.
+  const settings = src.track?.getSettings()
   return (
     ratio(src.frame?.w, src.frame?.h) ??
     ratio(src.video?.videoWidth, src.video?.videoHeight) ??
-    ratio(src.track?.getSettings().width, src.track?.getSettings().height)
+    ratio(settings?.width, settings?.height)
   )
 }
 

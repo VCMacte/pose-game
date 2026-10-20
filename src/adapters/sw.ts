@@ -16,7 +16,12 @@
  */
 
 import { CODE_FILES, CODE_VERSION, VENDOR_VERSION } from './sw-manifest'
-import { VENDOR } from './pose/source'
+/*
+ * Пути берутся из ЛИСТОВОГО модуля, а не из `pose/source`: оттуда в бандл
+ * service worker'а уезжал весь конвейер позы, а с ним `log/store.ts`, где на
+ * уровне модуля создаётся журнал. Список остаётся один — см. `./pose/vendor`.
+ */
+import { VENDOR } from './pose/vendor'
 
 export const BUILD = Object.freeze({
   version: CODE_VERSION,

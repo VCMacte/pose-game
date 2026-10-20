@@ -106,7 +106,7 @@ export function placeFigure(f: Figure, box: Box): Placed {
 
   const spanX = Math.max(maxX - minX, 1e-6)
   const spanY = Math.max(maxY - minY, 1e-6)
-  const k = (Math.min(box.w / spanX, box.h / spanY) * RENDER.figureFill) / 1
+  const k = Math.min(box.w / spanX, box.h / spanY) * RENDER.figureFill
 
   // Центрируем по прямоугольнику: фигура — предмет внимания, а не угловой знак.
   const offX = box.x + box.w / 2 - ((minX + maxX) / 2) * k

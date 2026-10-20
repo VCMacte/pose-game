@@ -53,25 +53,13 @@ const at = (path: string): string =>
  * модель и wasm вместе весят семнадцать мегабайт.
  * → `docs/offline-and-build.md`
  */
-export const VENDOR = Object.freeze({
-  /**
-   * Каталог wasm для `FilesetResolver.forVisionTasks()`. Загрузчик сам
-   * достраивает имя: `vision_wasm_internal.js` при поддержке SIMD и
-   * `vision_wasm_nosimd_internal.js` без неё. Вариант без SIMD мы не кладём
-   * (ещё 10.5 МБ), поэтому поддержку спрашиваем предикатом самой библиотеки
-   * до запуска — см. `worker.ts`.
-   */
-  wasmBase: 'vendor/mediapipe/wasm',
-  /**
-   * Две сборки одной библиотеки, и обе нужны. Классическая (IIFE, кладёт
-   * глобаль `Vision`) — для воркера: он обязан быть классическим. Модульная —
-   * для пути `main`. Версия у них ОДНА: wasm и сборка должны быть из одного
-   * набора, иначе падение приходит изнутри wasm и на дефект кода не похоже.
-   */
-  bundleClassic: 'vendor/mediapipe/vision_bundle.js',
-  bundleModule: 'vendor/mediapipe/vision_bundle.mjs',
-  model: 'models/pose_landmarker_lite.task',
-} as const)
+/*
+ * Пути вендора живут в ЛИСТОВОМ модуле и переэкспортируются отсюда для
+ * совместимости: их нужны знать и источник позы, и service worker, а импорт
+ * из этого файла тянул в бандл воркера весь конвейер позы вместе с журналом.
+ */
+export { VENDOR } from './vendor'
+import { VENDOR } from './vendor'
 
 // ───────────────────────── контракт ─────────────────────────
 

@@ -1,28 +1,105 @@
 /**
- * Точка входа. Всё, что здесь есть, — поднять оболочку над настоящим DOM.
+ * Точка входа: поднять оболочку над настоящим браузером и подать ей настоящие
+ * адаптеры.
  *
- * Зависимости (камера, звук, источник позы) оболочка берёт по умолчанию из
- * браузера; подменяются они только в тестах. Поэтому здесь нет ни одной
- * строчки логики: логика, которую видно лишь в браузере, непроверяема.
+ * Логики здесь нет и не должно быть — логика, которую видно лишь в браузере,
+ * непроверяема. Здесь только подстановка: что в тестах подменяется, то в бою
+ * подаётся отсюда.
  */
 
+import { createAudio } from './adapters/audio'
+import { clear, save, status } from './adapters/log/store'
+import { buildInfo, checkVendor } from './adapters/sw'
 import { startApp } from './shell/app'
 
 const root = document.getElementById('app')
-if (root) startApp(root)
 
-/*
- * Регистрация service worker — ПОСЛЕ запуска приложения и без ожидания: офлайн
- * это запас на следующий раз, а не условие сегодняшнего запуска. Отказ
- * регистрации (нет https, выключены service worker'ы) игру не задевает: она
- * играется из сети.
- *
- * В dev worker не регистрируется вовсе — `import.meta.env.DEV`: иначе
- * закэшированная сборка перебивала бы правки, и каждая из них требовала бы
- * сброса данных в браузере.
- */
-if (!import.meta.env.DEV && 'serviceWorker' in navigator) {
-  void navigator.serviceWorker.register('/sw.js', { type: 'module' }).catch(() => {
-    // Офлайна не будет; из сети игра идёт.
+if (root) {
+  /** Сводка журнала и целостность вендора — для служебного экрана. */
+  let logInfo = { sessions: 0, events: 0, bytes: 0, broken: false }
+  let modelCached = false
+
+  startApp(root, {
+    audio: createAudio(),
+
+    /**
+     * Замер задержки тракта. Микрофон и арифметика грузятся ДИНАМИЧЕСКИ:
+     * на экране забега они не нужны, а разрешение на микрофон спрашивается
+     * только здесь и только по нажатию кнопки.
+     */
+    measureLatency: async () => {
+      let mic: { close(): Promise<void> } | null = null
+      try {
+        const [{ measureLatency }, { micLoopback }] = await Promise.all([
+          import('./adapters/latency'),
+          import('./adapters/mic'),
+        ])
+        const loopback = await micLoopback()
+        mic = loopback
+        return await measureLatency({ loopback })
+      } catch {
+        /*
+         * Отказ замера — не повод ронять служебный экран: он и так про
+         * диагностику, а причина уже записана в журнал событием
+         * `latency.measured` с `ok: false`.
+         */
+        return null
+      } finally {
+        // Микрофон отпускается В ЛЮБОМ исходе: иначе индикатор горит дальше.
+        if (mic) await mic.close()
+      }
+    },
+
+    saveLog: async () => {
+      await save()
+      logInfo = await summary()
+    },
+
+    clearLog: async () => {
+      await clear()
+      logInfo = await summary()
+    },
+
+    serviceInfo: () => ({
+      log: logInfo,
+      latency: null,
+      build: { ...buildInfo(), modelCached },
+    }),
   })
+
+  /*
+   * Сводка журнала и целостность вендора спрашиваются ПОСЛЕ старта и без
+   * ожидания: обе ходят в хранилище, а меню обязано открыться сразу.
+   */
+  void summary().then((s) => {
+    logInfo = s
+  })
+  void checkVendor(typeof caches === 'undefined' ? null : caches).then((r) => {
+    modelCached = r.ok
+  })
+
+  /*
+   * Регистрация service worker — ПОСЛЕ запуска приложения и без ожидания:
+   * офлайн это запас на следующий раз, а не условие сегодняшнего запуска.
+   * Отказ регистрации (нет https, выключены service worker'ы) игру не задевает.
+   *
+   * В dev worker не регистрируется вовсе: иначе закэшированная сборка
+   * перебивала бы правки, и каждая из них требовала бы сброса данных.
+   */
+  if (!import.meta.env.DEV && 'serviceWorker' in navigator) {
+    void navigator.serviceWorker.register('/sw.js', { type: 'module' }).catch(() => {
+      // Офлайна не будет; из сети игра идёт.
+    })
+  }
+}
+
+/** Сводка журнала в том виде, какой ждёт служебный экран. */
+async function summary(): Promise<{
+  sessions: number
+  events: number
+  bytes: number
+  broken: boolean
+}> {
+  const s = await status()
+  return { sessions: s.sessions, events: s.events, bytes: s.bytes, broken: s.broken }
 }
