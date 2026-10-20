@@ -101,6 +101,19 @@ function bodyAt(script: FakeScript, i: number): Partial<StickDesc> | null {
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
 /**
+ * Чем источник выдерживает частоту. Подменяется, и только затем, чтобы забег
+ * можно было проиграть БЫСТРЕЕ реального времени.
+ *
+ * Зачем это понадобилось: сквозной тест (задача 22) проигрывает забег на 90
+ * игровых секунд, и на настоящих паузах он длился бы те же 90 секунд — то
+ * есть единственная проверка, проходящая весь путь целиком, не могла бы
+ * входить в обычный прогон вовсе. Отметка `t` внутри кадра от этого не
+ * зависит: она растёт на `1000 / hz` всегда, и окно судейства видит те же
+ * 7±1 кадр при любой подмене.
+ */
+export type Pace = (ms: number) => Promise<void>
+
+/**
  * Источник кадров вместо камеры: один из шести сценариев темы «Синтетический
  * игрок», на заданной частоте `hz`.
  *
@@ -119,8 +132,13 @@ const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout
  * бросает (JS/рантайм, если тип обойдён). Вызывается синхронно здесь же, до
  * возврата объекта и до единого кадра — источник не может быть создан, не
  * объявив себя синтетическим.
+ *
+ * `pace` — ЧЕТВЁРТЫМ и необязательным: по умолчанию настоящая пауза, то есть
+ * настоящая частота. Подменяют его только тесты, и только чтобы не ждать
+ * девяносто секунд забега в реальном времени; порядок параметров оставлен
+ * прежним намеренно — обязательность `onMark` ослаблять нельзя.
  */
-export function fakeSource(script: FakeScript, hz: number, onMark: OnMark): FakeSource {
+export function fakeSource(script: FakeScript, hz: number, onMark: OnMark, pace: Pace = sleep): FakeSource {
   if (!SCRIPTS.includes(script)) {
     throw new Error(`fakeSource: нет сценария «${String(script)}», есть: ${SCRIPTS.join(', ')}`)
   }
@@ -143,7 +161,7 @@ export function fakeSource(script: FakeScript, hz: number, onMark: OnMark): Fake
       yield { t, lm: d === null ? null : stick({ aspect: ASPECT, ...d }) }
       i += 1
       t += periodMs
-      await sleep(periodMs)
+      await pace(periodMs)
     }
   }
 
