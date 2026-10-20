@@ -27,7 +27,12 @@ npm test -- --maxWorkers=8        # tsc --noEmit, затем vitest run
 npm run build                     # двухпроходная сборка, см. docs/offline-and-build.md
 node tools/log-report.mjs <файл>  # числа забега из журнала с телефона
 node tools/replay.mjs <файл>      # записанный скелет через нынешнее ядро
+npm run deploy                    # собрать и выложить на GitHub Pages
 ```
+
+Pages отдаёт ветку `gh-pages` как есть, а не собирает сам: сборка в Actions
+требует у токена права `workflow`. `npm run deploy` собирает и перезаписывает
+эту ветку слепком. Разбор — [`docs/offline-and-build.md`](docs/offline-and-build.md).
 
 ## Документация
 

@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "node tools/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck && vitest run"
+    "test": "npm run typecheck && vitest run",
+    "deploy": "node tools/deploy.mjs"
   },
   "dependencies": {
     "@mediapipe/tasks-vision": "^0.10.17"
