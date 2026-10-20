@@ -115,3 +115,52 @@ export function buildInfo(): BuildInfo {
   return { version: BUILD.version, date }
 }
 
+/**
+ * Сбросить офлайн-кэш и снять регистрацию worker'а.
+ *
+ * Нужно, когда в кэше уже лежит сборка, которую надо выкинуть: Pages отдаёт
+ * файлы с `max-age`, и браузер до десяти минут не видит новую версию, а
+ * worker всё это время отдаёт из своего кэша старое. Это не теоретическая
+ * беда — в `run-game` на ней потеряли полчаса, отлаживая правки, которых
+ * страница просто не видела.
+ *
+ * Снимается И регистрация: удалить одни кэши мало — контроллер у уже
+ * управляемой страницы живёт до конца её жизни, и worker бодро создаст кэш
+ * заново вместе с семнадцатью мегабайтами вендора.
+ *
+ * Перезагрузку делает ВЫЗЫВАЮЩИЙ: решение «куда идти дальше» принадлежит
+ * оболочке, а не адаптеру.
+ */
+export async function dropCaches(): Promise<{ caches: number; workers: number }> {
+  let dropped = 0
+  let workers = 0
+
+  try {
+    const store = (globalThis as { caches?: CacheStorage }).caches
+    if (store) {
+      for (const name of await store.keys()) {
+        // Чужие кэши на том же домене не трогаем: на GitHub Pages рядом могут
+        // жить другие проекты того же аккаунта.
+        if (!name.startsWith('pose-game-')) continue
+        if (await store.delete(name)) dropped++
+      }
+    }
+  } catch {
+    // Не вышло — скажем числом, а не исключением: кнопка диагностики не имеет
+    // права уронить экран, с которого её нажали.
+  }
+
+  try {
+    const sw = (globalThis as { navigator?: { serviceWorker?: ServiceWorkerContainer } }).navigator
+      ?.serviceWorker
+    if (sw) {
+      for (const r of await sw.getRegistrations()) {
+        if (await r.unregister()) workers++
+      }
+    }
+  } catch {
+    // То же самое.
+  }
+
+  return { caches: dropped, workers }
+}

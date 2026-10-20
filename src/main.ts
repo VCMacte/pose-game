@@ -65,6 +65,17 @@ if (root) {
       latency: null,
       build: { ...buildInfo(), modelCached },
     }),
+
+    /*
+     * Сброс офлайн-кэша и перезагрузка. Перезагрузка обязательна: снять одни
+     * кэши мало — страницей до конца её жизни продолжает управлять прежний
+     * worker, и кнопка выглядела бы не сработавшей.
+     */
+    refreshCache: async () => {
+      const { dropCaches } = await import('./adapters/sw')
+      await dropCaches()
+      location.reload()
+    },
   })
 
   /*

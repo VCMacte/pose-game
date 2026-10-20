@@ -16,6 +16,7 @@
 import type { Audio } from '../adapters/audio'
 import { createRenderer } from '../adapters/render/canvas'
 import type { Renderer } from '../adapters/render/canvas'
+import { dropCaches } from '../adapters/sw'
 import { frameAspect } from '../adapters/camera'
 import type { AspectSource } from '../adapters/camera'
 import { write as journalWrite } from '../adapters/log/store'
@@ -28,6 +29,7 @@ import { makePlay } from './play'
 import type { Play } from './play'
 import type { Loop } from './loop'
 import { menuScreen } from './screens/menu'
+import type { MenuInfo } from './screens/menu'
 import { runScreen } from './screens/run'
 import type { RunScreen, RunStage } from './screens/run'
 import { serviceScreen } from './screens/service'
@@ -58,6 +60,8 @@ export type AppDeps = {
   /** Выгрузка и очистка журнала — кнопки служебного экрана. */
   saveLog?: () => Promise<void>
   clearLog?: () => Promise<void>
+  /** Сброс офлайн-кэша и перезагрузка — кнопка меню. */
+  refreshCache?: () => Promise<void>
   /**
    * Запуск источника позы. Приходит зависимостью и по умолчанию грузится
    * ДИНАМИЧЕСКИ: этим семнадцать мегабайт вендора MediaPipe остаются за
@@ -107,6 +111,18 @@ export type App = {
   /** Последний замер задержки, если он был: его показывает служебный экран. */
   readonly latency: { medianMs: number; spreadMs: number } | null
   stop(): void
+}
+
+/**
+ * Сброс кэша по умолчанию: снять кэши и регистрацию, затем перезагрузиться.
+ *
+ * Перезагрузка ЗДЕСЬ, а не в адаптере: куда идти после сброса — решение
+ * оболочки. Без неё страницей до конца её жизни продолжает управлять прежний
+ * worker, и кнопка выглядела бы не сработавшей.
+ */
+async function defaultRefreshCache(): Promise<void> {
+  await dropCaches()
+  location.reload()
 }
 
 const EMPTY_INFO: ServiceInfo = {
@@ -284,6 +300,32 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   }
 
   /**
+   * Строка информации меню: версия сборки и то, что меняет поведение.
+   *
+   * Пометки — не украшение: включённый синтетический источник или
+   * принудительный конвейер однажды дадут «камера ни на что не влияет», и
+   * искать причину будут в камере. Модель взята из `run-game`.
+   */
+  function menuInfo(): MenuInfo {
+    const marks: string[] = []
+    if (debug.source === 'фейк') marks.push('источник: СИНТЕТИКА, камера не работает')
+    if (debug.pipeline !== 'авто') marks.push(`конвейер: ${debug.pipeline}`)
+    if (debug.rawAlways === true) marks.push('сплошная запись скелета')
+
+    const info = serviceInfo()
+    if (info.log.broken) marks.push('журнал выключен')
+    // Про отсутствие модели в кэше надо знать ДО того, как выйдешь из сети.
+    if (!info.build.modelCached) marks.push('модель не в кэше: офлайн не выйдет')
+
+    /*
+     * Версия берётся из ТОЙ ЖЕ сводки, что и остальное, а не своим вызовом
+     * `buildInfo()`: два источника разъехались бы, и строка показывала бы одну
+     * версию, а служебный экран — другую.
+     */
+    return { version: info.build.version, date: info.build.date, marks }
+  }
+
+  /**
    * Меню паузы — только на РУЧНОЙ паузе.
    *
    * На автопаузе ребёнок всего лишь вышел из кадра, и предлагать там «вернуться
@@ -312,8 +354,12 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
         menuScreen({
           settings,
           best: best(),
+          info: menuInfo(),
           onPlay: () => go('run'),
           onAdult: () => go('settings'),
+          onRefreshCache: () => {
+            void (deps.refreshCache ?? defaultRefreshCache)()
+          },
           refresh: draw,
         }),
       )
@@ -322,7 +368,12 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
 
     if (screen === 'settings') {
       root.replaceChildren(
-        settingsScreen({ settings, onBack: () => go('menu'), refresh: draw }),
+        settingsScreen({
+        settings,
+        onBack: () => go('menu'),
+        onService: () => go('service'),
+        refresh: draw,
+      }),
       )
       return
     }

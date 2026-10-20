@@ -487,3 +487,92 @@ describe('меню паузы', () => {
     expect(wrote.filter((t) => t === 'run.abort').length).toBe(0)
   })
 })
+
+describe('строка информации и обслуживание', () => {
+  test('в меню показана версия сборки', () => {
+    /*
+     * Установленное PWA обновляется само и молча: без номера на экране
+     * невозможно понять, доехала ли сборка до телефона, а журнал со
+     * вчерашней выглядит точно так же, как с сегодняшней.
+     */
+    app({ serviceInfo: () => info({ version: '20261020-0930', modelCached: true }) })
+    expect(byTest('info')?.textContent).toContain('20261020')
+  })
+
+  test('синтетический источник ПОМЕЧЕН в строке информации', () => {
+    // Иначе однажды ребёнку дадут поиграть с синтетикой и будут гадать,
+    // почему камера ни на что не влияет.
+    const a = app({ serviceInfo: () => info({ modelCached: true }) })
+    a.go('service')
+    const sources = all('[data-test="debug-source"] button')
+    sources[1].click()
+    a.go('menu')
+    expect(byTest('info')?.textContent).toMatch(/СИНТЕТИКА/)
+  })
+
+  test('отсутствие модели в кэше ПОМЕЧЕНО: офлайн не выйдет', () => {
+    // Знать об этом надо ДО того, как выйдешь из сети.
+    app({ serviceInfo: () => info({ modelCached: false }) })
+    expect(byTest('info')?.textContent).toMatch(/модель не в кэше/)
+  })
+
+  test('когда всё обычно, пометок нет — только версия', () => {
+    // Строка, вечно полная предупреждений, перестаёт читаться.
+    app({ serviceInfo: () => info({ modelCached: true }) })
+    expect(all('[data-test="info"] .mark').length).toBe(0)
+  })
+
+  test('кнопка обновления кэша есть в МЕНЮ и работает', () => {
+    /*
+     * Именно в меню: когда в кэше лежит сломанная сборка, до внутренних
+     * экранов можно и не добраться — а это ровно тот случай, когда кнопка и
+     * нужна.
+     */
+    let dropped = 0
+    const a = app({ refreshCache: async () => void dropped++ })
+    expect(byTest('refresh-cache')).not.toBeNull()
+    byTest('refresh-cache')!.click()
+    expect(dropped).toBe(1)
+    void a
+  })
+
+  test('служебный экран ДОСТИЖИМ из настроек', () => {
+    /*
+     * Он существовал, но нажать его было негде: вход к взрослому вёл в
+     * настройки, а оттуда дороги дальше не было вовсе — то есть журнал,
+     * замер задержки и отладка были недоступны из интерфейса.
+     */
+    const a = app()
+    byTest('adult')!.click()
+    expect(a.screen()).toBe('settings')
+    expect(byTest('to-service')).not.toBeNull()
+    byTest('to-service')!.click()
+    expect(a.screen()).toBe('service')
+  })
+
+  test('выгрузка и очистка журнала доступны и зовут журнал', async () => {
+    let saved = 0
+    let cleared = 0
+    const a = app({ saveLog: async () => void saved++, clearLog: async () => void cleared++ })
+    byTest('adult')!.click()
+    byTest('to-service')!.click()
+    expect(a.screen()).toBe('service')
+    byTest('share-log')!.click()
+    byTest('clear-log')!.click()
+    await Promise.resolve()
+    expect({ saved, cleared }).toEqual({ saved: 1, cleared: 1 })
+  })
+})
+
+/** Сводка служебного экрана с нужными для проверки полями. */
+function info(over: { version?: string; modelCached?: boolean; broken?: boolean } = {}) {
+  return {
+    log: { sessions: 0, events: 0, bytes: 0, broken: over.broken ?? false },
+    latency: null,
+    build: {
+      version: over.version ?? 'dev',
+      date: '—',
+      modelCached: over.modelCached ?? true,
+    },
+  }
+}

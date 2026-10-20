@@ -35,6 +35,12 @@ const sec = (ms: number): string => String(ms / 1000)
 export type SettingsOpts = {
   settings: Settings
   onBack(): void
+  /**
+   * Служебный экран. Отдельной кнопкой, потому что иначе он НЕДОСТИЖИМ: вход
+   * к взрослому ведёт сюда, а отсюда дальше дороги не было вовсе — журнал,
+   * замер задержки и отладка существовали, но нажать их было негде.
+   */
+  onService(): void
   refresh(): void
 }
 
@@ -43,7 +49,10 @@ export function settingsScreen(o: SettingsOpts): HTMLElement {
   const re = o.refresh
 
   return el('div', { class: 'screen settings' }, [
-    el('div', { class: 'top' }, [button('← Назад', o.onBack, { 'data-test': 'back' })]),
+    el('div', { class: 'top' }, [
+      button('← Назад', o.onBack, { 'data-test': 'back' }),
+      button('Служебный экран', o.onService, { 'data-test': 'to-service' }),
+    ]),
     el('h1', { text: 'Настройки забега' }),
 
     group('Такт', [
