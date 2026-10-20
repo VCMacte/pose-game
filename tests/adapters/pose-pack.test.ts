@@ -16,8 +16,10 @@ import { makeClock, packLandmarks } from '../../src/adapters/pose/pack'
 import {
   ERRORS_BEFORE_NEXT,
   PIPELINES,
+  makeErrorRun,
   makeLadder,
   parsePipelineFlag,
+  pipelineFlagValue,
   pipelineId,
 } from '../../src/adapters/pose/pipelines'
 import { LANDMARK_COUNT, LANDMARK_STRIDE, pointAt } from '../../src/core/landmarks'
@@ -140,27 +142,7 @@ describe('лестница конвейеров', () => {
     expect(Object.isFrozen(PIPELINES)).toBe(true)
   })
 
-  test('пять ошибок подряд переводят на следующую попытку', () => {
-    const ladder = makeLadder()
-    expect(pipelineId(ladder.current()!)).toBe('stream/GPU')
-
-    for (let i = 1; i < ERRORS_BEFORE_NEXT; i++) {
-      expect(ladder.onError()).toBe('stay')
-      expect(pipelineId(ladder.current()!)).toBe('stream/GPU')
-    }
-    expect(ladder.onError()).toBe('next')
-    expect(pipelineId(ladder.current()!)).toBe('stream/CPU')
-  })
-
-  test('успешный кадр обнуляет счётчик: ошибки должны быть ПОДРЯД', () => {
-    const ladder = makeLadder()
-    for (let i = 1; i < ERRORS_BEFORE_NEXT; i++) ladder.onError()
-    ladder.onSuccess()
-    for (let i = 1; i < ERRORS_BEFORE_NEXT; i++) expect(ladder.onError()).toBe('stay')
-    expect(pipelineId(ladder.current()!)).toBe('stream/GPU')
-  })
-
-  test('отказ открытия конвейера переводит сразу, без счёта ошибок', () => {
+  test('ступень сходит сразу: счёта ошибок у лестницы НЕТ', () => {
     const ladder = makeLadder()
     expect(ladder.onDown()).toBe('next')
     expect(pipelineId(ladder.current()!)).toBe('stream/CPU')
@@ -200,5 +182,62 @@ describe('лестница конвейеров', () => {
     expect(pipelineId(ladder.current()!)).toBe('main/GPU')
     expect(ladder.onDown()).toBe('exhausted')
     expect(ladder.current()).toBeNull()
+  })
+})
+
+/*
+ * Счётчик ошибок проверяется ЗДЕСЬ, а не через лестницу, и это тот самый
+ * дефект, ради которого он выделен: раньше тест стоял над счётчиком внутри
+ * `makeLadder`, которого в бою не вызывал никто — ни воркер, ни путь `main`
+ * (у второго было своё число `5` в коде). Правка порога ничего не меняла, а
+ * прогон оставался зелёным. Теперь проверяемый автомат и есть рабочий.
+ */
+describe('счётчик ошибок подряд', () => {
+  test('ступень сходит ровно на пятой ошибке подряд', () => {
+    const run = makeErrorRun()
+    for (let i = 1; i < ERRORS_BEFORE_NEXT; i++) expect(run.onError()).toBe(false)
+    expect(run.onError()).toBe(true)
+  })
+
+  test('посчитанный кадр обнуляет счёт: ошибки должны быть ПОДРЯД', () => {
+    const run = makeErrorRun()
+    for (let i = 1; i < ERRORS_BEFORE_NEXT; i++) run.onError()
+    run.onSuccess()
+    for (let i = 1; i < ERRORS_BEFORE_NEXT; i++) expect(run.onError()).toBe(false)
+  })
+
+  test('отказ объявляется ОДИН раз, а не на каждом следующем кадре', () => {
+    // Иначе ступень, уже признанная сошедшей, звала бы `fell` на каждой
+    // последующей ошибке — а гасится она один раз.
+    const run = makeErrorRun(2)
+    expect(run.onError()).toBe(false)
+    expect(run.onError()).toBe(true)
+    expect(run.onError()).toBe(false)
+  })
+
+  test('порог по умолчанию — общий `ERRORS_BEFORE_NEXT`, а не своё число', () => {
+    const run = makeErrorRun()
+    for (let i = 1; i < ERRORS_BEFORE_NEXT; i++) run.onError()
+    expect(run.onError()).toBe(true)
+  })
+})
+
+describe('значение флага ?pipeline=', () => {
+  test('отвергнутое значение называется, а не пропадает молча', () => {
+    // «Флага нет» и «флаг не совпал ни с чем» дают один `null` у разбора, но
+    // на штативе это РАЗНЫЕ случаи: во втором выбор делали руками.
+    expect(parsePipelineFlag('?pipeline=вертолёт')).toBeNull()
+    expect(pipelineFlagValue('?pipeline=вертолёт')).toBe('вертолёт')
+    expect(pipelineFlagValue('?pipeline=main/CPU')).toBe('main/CPU')
+  })
+
+  test('голое значение проходит как есть', () => {
+    expect(pipelineFlagValue('stream')).toBe('stream')
+  })
+
+  test('флага нет — нет и значения', () => {
+    expect(pipelineFlagValue(null)).toBeNull()
+    expect(pipelineFlagValue('')).toBeNull()
+    expect(pipelineFlagValue('?debug=1')).toBeNull()
   })
 })

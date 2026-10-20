@@ -25,7 +25,7 @@
 
 import { POSE, landmarkerOptions, looksLikeCpu, makeClock, packLandmarks, warmup } from './pack'
 import type { Delegate, Landmarker } from './pack'
-import { ERRORS_BEFORE_NEXT } from './pipelines'
+import { ERRORS_BEFORE_NEXT, makeErrorRun } from './pipelines'
 import type { PipelineMode } from './pipelines'
 
 // ───────────────────────── сообщения ─────────────────────────
@@ -85,6 +85,12 @@ export type FromWorker =
    * потому что конвейер `bitmap` держит поток управления ПО ПОДТВЕРЖДЕНИЮ: без
    * этого отброшенный кадр означал бы вечное ожидание подтверждения, которое
    * никогда не придёт, и конвейер встал бы навсегда при живом воркере.
+   *
+   * Постится ТОЛЬКО в режиме `bitmap`, который его и ждёт. В `stream`
+   * подтверждения не ждёт никто, а камера на 30 fps при потолке 12 Гц даёт
+   * восемнадцать отбросов в секунду: восемнадцать пустых побудок главного
+   * потока в секунду — это ровно то, ради отсутствия чего ступень `stream` и
+   * стоит первой («главный поток на кадр не делает ничего»).
    */
   | { type: 'drop' }
   | { type: 'stopped' }
@@ -142,7 +148,10 @@ let pending: Frameish | null = null
 let busy = false
 let dropped = 0
 let lastRun = 0
-let errors = 0
+/** Счётчик ошибок подряд — ОБЩИЙ с путём `main` (`makeErrorRun`, один порог). */
+const errorRun = makeErrorRun()
+/** Ждут ли подтверждения кадра: только `bitmap`. См. сообщение `drop`. */
+let needsAck = false
 let busyMs = 0
 let beat: ReturnType<typeof setInterval> | null = null
 const inferTimes: number[] = []
@@ -168,7 +177,7 @@ function release(frame: Frameish | null | undefined): void {
 function drop(frame: Frameish): void {
   release(frame)
   dropped++
-  post({ type: 'drop' })
+  if (needsAck) post({ type: 'drop' })
 }
 
 /** Новый кадр вытесняет непосчитанный старый: свежесть важнее полноты. */
@@ -208,11 +217,13 @@ function kick(): void {
 
   const t0 = performance.now()
   let lm: Float32Array | null = null
+  /** Пятая ошибка подряд: ступень сошла. Переменная живёт один кадр. */
+  let fallen = false
   try {
     lm = packLandmarks(landmarker.detectForVideo(frame, clock(now())))
-    errors = 0
+    errorRun.onSuccess()
   } catch (e) {
-    errors++
+    fallen = errorRun.onError()
     const err = e as { name?: string; message?: string }
     post({
       type: 'pose.error',
@@ -248,9 +259,11 @@ function kick(): void {
   )
   dropped = 0
 
-  if (errors >= ERRORS_BEFORE_NEXT) {
+  // Порог берётся из `ERRORS_BEFORE_NEXT` ЕДИНОЖДЫ — внутри `makeErrorRun`,
+  // которым считает и путь `main`. Своего числа у воркера нет: разошлись бы
+  // молча, а проверить это на железе нечем.
+  if (fallen) {
     post({ type: 'fail', stage: 'infer', message: `${ERRORS_BEFORE_NEXT} ошибок инференса подряд` })
-    errors = 0
   }
 
   // Пока считали, мог прийти следующий кадр — он и посчитается, один.
@@ -284,6 +297,7 @@ function stopEverything(): void {
 
 async function init(msg: InitMsg): Promise<void> {
   hz = msg.hz || hz
+  needsAck = msg.mode === 'bitmap'
   /*
    * У воркера своё начало отсчёта — момент его создания. Без поправки каждая
    * межпоточная метка смещена на задержку запуска воркера, и это смещение
@@ -318,7 +332,12 @@ async function init(msg: InitMsg): Promise<void> {
   const initMs = Math.round(performance.now() - t0)
 
   clock = makeClock()
-  const warmupMs = warmup(landmarker, clock)
+  /*
+   * Прогрев кормит часы ТЕМ ЖЕ `now()`, что и живой инференс. База времени у
+   * воркера своя (поправка отрицательна), и `performance.now()` здесь оставил
+   * бы часы на тысячи миллисекунд впереди первого живого кадра — см. `warmup`.
+   */
+  const warmupMs = warmup(landmarker, clock, now)
 
   post({
     type: 'ready',

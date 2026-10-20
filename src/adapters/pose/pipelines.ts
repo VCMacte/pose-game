@@ -49,20 +49,59 @@ export const pipelineId = (p: Pipeline): string => `${p.mode}/${p.delegate}`
  * Ошибок инференса ПОДРЯД, после которых текущий конвейер считается сошедшим.
  * Одиночная ошибка бывает и на живом конвейере (кадр пришёл закрытым,
  * например), а пять подряд — это уже не кадр.
+ *
+ * **Порог ровно один на весь источник позы,** и это требование, а не удобство.
+ * Считают ошибки ДВА разных исполнителя — воркер (`worker.ts`) и путь на
+ * главном потоке (`source.ts`), — и раньше второй держал порог числом `5` в
+ * коде, не импортируя эту константу вовсе. Тест при этом стоял над третьим,
+ * никем не вызываемым счётчиком внутри лестницы: правка этой строки на `3`
+ * ничего в бою не меняла, а прогон оставался зелёным. Поэтому счётчик здесь
+ * один (`makeErrorRun`), им пользуются оба исполнителя, и он же проверяется
+ * тестом — проверяемый автомат и есть рабочий.
  */
 export const ERRORS_BEFORE_NEXT = 5
 
-/** Что делать после отказа: остаться, перейти к следующей попытке, сдаться. */
-export type LadderStep = 'stay' | 'next' | 'exhausted'
+/**
+ * Счётчик ошибок ПОДРЯД для одной ступени. `onError()` отдаёт `true` ровно на
+ * той ошибке, после которой ступень считается сошедшей, и сам обнуляется:
+ * отказ объявляется один раз, а не на каждом следующем кадре.
+ *
+ * Обнуление успехом обязательно: без него ступень съезжала бы от пяти редких
+ * одиночных сбоев, разнесённых по минутам, — ошибки должны быть ПОДРЯД.
+ */
+export type ErrorRun = {
+  /** Одна ошибка инференса. `true` — ступень сошла. */
+  onError(): boolean
+  /** Кадр посчитан: счётчик обнуляется. */
+  onSuccess(): void
+}
+
+export function makeErrorRun(limit: number = ERRORS_BEFORE_NEXT): ErrorRun {
+  let errors = 0
+  return {
+    onError: () => {
+      if (++errors < limit) return false
+      errors = 0
+      return true
+    },
+    onSuccess: () => {
+      errors = 0
+    },
+  }
+}
+
+/** Что делать после отказа ступени: следующая попытка или конец лестницы. */
+export type LadderStep = 'next' | 'exhausted'
 
 export type Ladder = {
   /** Текущая попытка, либо `null`, если лестница исчерпана. */
   current(): Pipeline | null
-  /** Одна ошибка инференса. Пятая подряд переводит на следующую попытку. */
-  onError(): LadderStep
-  /** Кадр посчитан: счётчик ошибок обнуляется — ошибки должны быть ПОДРЯД. */
-  onSuccess(): void
-  /** Конвейер не открылся вовсе (не завёлся воркер, нет ответа `ready`). */
+  /**
+   * Ступень сошла — не открылась или умерла после `ready`. Счёта ошибок здесь
+   * НЕТ намеренно: его ведёт `makeErrorRun` там, где кадры и считаются, а
+   * второй счётчик в лестнице был бы ровно тем сторожем, который сторожит сам
+   * себя.
+   */
   onDown(): LadderStep
   /** Номер текущей ступени, для журнала. */
   index(): number
@@ -75,24 +114,31 @@ export type Ladder = {
  */
 export function makeLadder(list: readonly Pipeline[] = PIPELINES): Ladder {
   let i = 0
-  let errors = 0
-
-  /** Шаг вниз по лестнице. Исчерпание называется явно, а не молчит. */
-  const advance = (): LadderStep => {
-    errors = 0
-    i++
-    return i < list.length ? 'next' : 'exhausted'
-  }
 
   return {
     current: () => list[i] ?? null,
-    onError: () => (++errors >= ERRORS_BEFORE_NEXT ? advance() : 'stay'),
-    onSuccess: () => {
-      errors = 0
+    onDown: (): LadderStep => {
+      i++
+      return i < list.length ? 'next' : 'exhausted'
     },
-    onDown: advance,
     index: () => i,
   }
+}
+
+/**
+ * Само значение `?pipeline=`, как его написали, либо `null`, если флага нет.
+ *
+ * Отдельно от разбора, потому что «флага нет» и «флаг не совпал ни с чем» —
+ * РАЗНЫЕ случаи, а `parsePipelineFlag` отдаёт на оба один `null`. На штативе
+ * опечатка (или намеренно отсутствующий `main/CPU`) без этой строки выглядит
+ * как «мой принудительный выбор молча проигнорировали», и понять, почему
+ * поехала полная лестница, не из чего. Отвергнутое значение называется в
+ * журнале — см. `pose.source` в `source.ts`.
+ */
+export function pipelineFlagValue(input: string | null | undefined): string | null {
+  if (!input) return null
+  if (!input.includes('=')) return input
+  return new URLSearchParams(input.startsWith('?') ? input.slice(1) : input).get('pipeline')
 }
 
 /**
@@ -108,14 +154,8 @@ export function makeLadder(list: readonly Pipeline[] = PIPELINES): Ladder {
  * `?pipeline=stream/CPU` — ровно одна попытка, когда проверяют именно её.
  */
 export function parsePipelineFlag(input: string | null | undefined): readonly Pipeline[] | null {
-  if (!input) return null
-
-  let value = input
-  if (input.includes('=')) {
-    const found = new URLSearchParams(input.startsWith('?') ? input.slice(1) : input).get('pipeline')
-    if (!found) return null
-    value = found
-  }
+  const value = pipelineFlagValue(input)
+  if (value === null) return null
 
   const [mode, delegate] = value.split('/')
   const picked = PIPELINES.filter(

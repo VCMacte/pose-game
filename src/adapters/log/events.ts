@@ -255,10 +255,86 @@ export type PoseReadyData = {
 
 export const poseReady = (d: PoseReadyData): Of<'pose.ready', PoseReadyData> => ({ type: 'pose.ready', data: d })
 
+/**
+ * Источник позы отказал ЦЕЛИКОМ, а не отдельной ступенью: камера не подключена
+ * к источнику, синтетический игрок не передан, итератор кадров бросил. Для
+ * ступеней лестницы есть `pose.pipeline.down` — см. ниже, и путать их нельзя.
+ */
 export const poseFail = (d: {
   pipeline: string
   message: string
 }): Of<'pose.fail', { pipeline: string; message: string }> => ({ type: 'pose.fail', data: d })
+
+/**
+ * Откуда берутся кадры и какая лестница поднимается. Пишется ОДИН раз на
+ * запуск источника, до первой попытки.
+ *
+ * `rejected` — значение `?pipeline=`, не совпавшее ни с одной ступенью
+ * (опечатка, либо намеренно отсутствующий `main/CPU`). Без этого поля
+ * отвергнутый принудительный выбор выглядел бы на штативе как «меня молча
+ * проигнорировали»: полная лестница поехала, а почему — не из чего понять.
+ */
+export type PoseSourceData = {
+  source: 'camera' | 'fake'
+  hz: number
+  /** Ступени, которые будут пробоваться, по порядку. */
+  ladder: string[]
+  /** Принудительный выбор, если он сработал. */
+  forced?: string
+  rejected?: string
+  script?: string
+}
+
+export const poseSource = (d: PoseSourceData): Of<'pose.source', PoseSourceData> => ({
+  type: 'pose.source',
+  data: d,
+})
+
+/** Ступень начала подниматься. Пара к `pose.ready` и к `pose.pipeline.down`. */
+export type PoseBootData = { pipeline: string; index: number; delegate: 'GPU' | 'CPU' }
+
+export const poseBoot = (d: PoseBootData): Of<'pose.boot', PoseBootData> => ({ type: 'pose.boot', data: d })
+
+/**
+ * ОДНА ошибка инференса — ещё не отказ ступени: кадр приходит закрытым, и это
+ * бывает на вполне живом конвейере. Отдельное событие именно затем, чтобы
+ * одиночная ошибка не читалась разбором журнала как сошедшая ступень; порог
+ * «пять подряд» (`ERRORS_BEFORE_NEXT`) превращает её в `pose.pipeline.down`
+ * с `why: 'died'`.
+ */
+export type PoseErrorData = {
+  pipeline: string
+  stage: string
+  name?: string
+  message: string
+  seq?: number
+}
+
+export const poseError = (d: PoseErrorData): Of<'pose.error', PoseErrorData> => ({ type: 'pose.error', data: d })
+
+/**
+ * Почему ступень лестницы больше не работает — **ПОЛЕМ**:
+ *
+ * - `unsupported` — ступень пропущена, её возможности в этом браузере нет
+ *   (нет `Worker`, `MediaStreamTrackProcessor`, `createImageBitmap`). Она даже
+ *   не пробовалась;
+ * - `open` — пробовалась и не открылась: воркер не ответил `ready` за
+ *   `POSE.initTimeoutMs`, wasm без SIMD, модель не загрузилась;
+ * - `died` — открылась, отдала `ready`, а потом сошла: пять ошибок инференса
+ *   подряд, молчание дольше `POSE.aliveTimeoutMs`, конец потока кадров.
+ *
+ * Три случая различаются полем, а не разбором русской прозы из `message`:
+ * на штативе проза — не поле, а разбору журнала надо отличать «браузер не
+ * умеет» от «GPU-делегат соврал и помер».
+ */
+export type PipelineDownWhy = 'unsupported' | 'open' | 'died'
+
+export type PosePipelineDownData = { pipeline: string; why: PipelineDownWhy; message: string }
+
+export const posePipelineDown = (d: PosePipelineDownData): Of<'pose.pipeline.down', PosePipelineDownData> => ({
+  type: 'pose.pipeline.down',
+  data: d,
+})
 
 // ───────────────────────── калибровка ─────────────────────────
 

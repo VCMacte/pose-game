@@ -18,11 +18,29 @@
  */
 
 import type { Frame } from '../../core/types'
-import { camEnded, camFail, poseFail, poseReady } from '../log/events'
+import {
+  camEnded,
+  camFail,
+  poseBoot,
+  poseError,
+  poseFail,
+  posePipelineDown,
+  poseReady,
+  poseSource,
+} from '../log/events'
+import type { PipelineDownWhy } from '../log/events'
 import { write } from '../log/store'
 import { POSE, landmarkerOptions, looksLikeCpu, makeClock, packLandmarks, warmup } from './pack'
 import type { Delegate, Landmarker } from './pack'
-import { PIPELINES, makeLadder, parsePipelineFlag, pipelineId } from './pipelines'
+import {
+  ERRORS_BEFORE_NEXT,
+  PIPELINES,
+  makeErrorRun,
+  makeLadder,
+  parsePipelineFlag,
+  pipelineFlagValue,
+  pipelineId,
+} from './pipelines'
 import type { Pipeline } from './pipelines'
 import type { FromWorker, InitMsg } from './worker'
 
@@ -89,8 +107,12 @@ export type SourceStatus =
       video: HTMLVideoElement | null
       script?: string
     }
-  /** Ступень лестницы сошла — следующая попытка уже идёт. */
-  | { kind: 'down'; pipeline: string; message: string }
+  /**
+   * Ступень лестницы сошла — следующая попытка уже идёт. `why` различает три
+   * случая ПОЛЕМ (`unsupported` / `open` / `died`), а не прозой в `message`:
+   * см. `pose.pipeline.down` в `../log/events`.
+   */
+  | { kind: 'down'; pipeline: string; why: PipelineDownWhy; message: string }
   /** Лестница кончилась: поз не будет, и об этом надо сказать вслух. */
   | { kind: 'exhausted'; message: string }
   | { kind: 'beat'; busyFrac: number; dropped: number; p50: number; p95: number }
@@ -204,6 +226,7 @@ async function startFake(opts: PoseSourceOpts, hz: number): Promise<Stop> {
     write(poseFail({ pipeline: 'fake', message: says(e) }))
   })
 
+  write(poseSource({ source: 'fake', hz, ladder: ['fake'], script }))
   write(poseReady({ pipeline: 'fake', delegate: 'CPU', warmupMs: null, source: 'fake', script }))
   opts.onStatus({
     kind: 'ready',
@@ -282,10 +305,29 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
     return async () => {}
   }
 
-  const forced = parsePipelineFlag(
-    opts.pipeline ?? (typeof location === 'undefined' ? null : location.search),
+  const flag = opts.pipeline ?? (typeof location === 'undefined' ? null : location.search)
+  const forced = parsePipelineFlag(flag)
+  const asked = pipelineFlagValue(flag)
+  const list = forced ?? PIPELINES
+
+  /*
+   * Отвергнутое значение `?pipeline=` НАЗЫВАЕТСЯ. Опечатка — и `main/CPU`,
+   * которого в лестнице нет намеренно, — дают тот же `null`, что и отсутствие
+   * флага, и без этой записи на штативе остаётся «мой принудительный выбор
+   * проигнорировали, а почему — непонятно». Пропускать выбор молча нельзя
+   * именно там, где его делают руками ради одной проверки.
+   */
+  write(
+    poseSource({
+      source: 'camera',
+      hz,
+      ladder: list.map(pipelineId),
+      ...(forced && asked ? { forced: asked } : {}),
+      ...(!forced && asked ? { rejected: asked } : {}),
+    }),
   )
-  const ladder = makeLadder(forced ?? PIPELINES)
+
+  const ladder = makeLadder(list)
 
   let stopped = false
   let seq = 0
@@ -308,10 +350,17 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
     opts.onSample({ t: meta.tCap, lm }, { ...meta, seq: seq++, pipeline: id })
   }
 
-  /** Ступень сошла: журнал и статус — одной строкой, чтобы не разошлись. */
-  const down = (p: Pipeline, message: string): null => {
-    write(poseFail({ pipeline: pipelineId(p), message }))
-    opts.onStatus({ kind: 'down', pipeline: pipelineId(p), message })
+  /**
+   * Ступень сошла: журнал и статус — одной строкой, чтобы не разошлись.
+   *
+   * `why` обязателен: «браузер не умеет этот путь», «путь не открылся» и
+   * «путь умер уже после `ready`» — три разных события для разбора журнала, и
+   * различаться они обязаны полем. Собранные в один `pose.fail` с русской
+   * прозой в `message`, они различались бы только грепом по тексту.
+   */
+  const down = (p: Pipeline, why: PipelineDownWhy, message: string): null => {
+    write(posePipelineDown({ pipeline: pipelineId(p), why, message }))
+    opts.onStatus({ kind: 'down', pipeline: pipelineId(p), why, message })
     return null
   }
 
@@ -327,11 +376,13 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
         return
       }
 
+      write(poseBoot({ pipeline: pipelineId(p), index: ladder.index(), delegate: p.delegate }))
+
       let attempt: Attempt | null = null
       try {
         attempt = p.mode === 'main' ? await startMain(p) : await startWorker(p)
       } catch (e) {
-        attempt = down(p, says(e))
+        attempt = down(p, 'open', says(e))
       }
 
       if (attempt) {
@@ -382,7 +433,7 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
     if (stopped || switching) return
     switching = true
     const p = ladder.current()
-    if (p) down(p, message)
+    if (p) down(p, 'died', message)
     const dying = active
     active = null
     if (dying) await dying.stop()
@@ -400,11 +451,13 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
     // Возможности браузера ПРОВЕРЯЮТСЯ, а не предполагаются, и пропущенная по
     // их отсутствию ступень тоже пишется в журнал: иначе «почему-то сразу
     // bitmap» не отличить от «stream пробовали и он упал».
-    if (typeof Worker === 'undefined') return down(p, 'нет Worker')
-    if (!track) return down(p, 'в потоке камеры нет видеодорожки')
-    if (p.mode === 'stream' && !frameProcessor()) return down(p, 'нет MediaStreamTrackProcessor')
+    if (typeof Worker === 'undefined') return down(p, 'unsupported', 'нет Worker')
+    if (!track) return down(p, 'unsupported', 'в потоке камеры нет видеодорожки')
+    if (p.mode === 'stream' && !frameProcessor()) {
+      return down(p, 'unsupported', 'нет MediaStreamTrackProcessor')
+    }
     if (p.mode === 'bitmap' && typeof createImageBitmap !== 'function') {
-      return down(p, 'нет createImageBitmap')
+      return down(p, 'unsupported', 'нет createImageBitmap')
     }
 
     // Воркер КЛАССИЧЕСКИЙ, не модульный: MediaPipe выполняет свой
@@ -415,6 +468,16 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
     let frameTimer: ReturnType<typeof setTimeout> | null = null
     let inFlight = false
     let killed = false
+    /*
+     * Сторож признака жизни. Воркер умеет умереть НЕ бросив `error` — на
+     * целевом телефоне его убивает Android по памяти, — и тогда `bitmap` ждал
+     * бы подтверждения кадра вечно, `stream` молчал бы, а лестница не
+     * двинулась бы ни на ступень. Признак жизни — ЛЮБОЕ сообщение воркера:
+     * `beat` идёт таймером раз в секунду независимо от кадров, так что
+     * замолчавшая камера (кадров нет, `beat` есть) под потолок не попадает,
+     * а умерший воркер попадает. Разбор потолка — `POSE.aliveTimeoutMs`.
+     */
+    let aliveTimer: ReturnType<typeof setTimeout> | null = null
     /** Клон дорожки для `stream`: гаснет вместе со ступенью, иначе камера
         остаётся занятой, а индикатор — горящим при мёртвом конвейере. */
     let clone: MediaStreamTrack | null = null
@@ -423,6 +486,8 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
       if (killed) return
       killed = true
       if (frameTimer !== null) clearTimeout(frameTimer)
+      if (aliveTimer !== null) clearTimeout(aliveTimer)
+      aliveTimer = null
       w.onmessage = null
       w.onerror = null
       try {
@@ -479,17 +544,32 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
       res = await withTimeout(ready, POSE.initTimeoutMs, `init ${pipelineId(p)}`)
     } catch (e) {
       await teardown()
-      return down(p, says(e))
+      return down(p, 'open', says(e))
     }
 
     if (res.type !== 'ready') {
       await teardown()
-      return down(p, res.type === 'fail' ? `${res.stage}: ${res.message}` : 'воркер не ответил ready')
+      return down(
+        p,
+        'open',
+        res.type === 'fail' ? `${res.stage}: ${res.message}` : 'воркер не ответил ready',
+      )
+    }
+
+    /** Сторож взводится заново на каждом сообщении: молчание и есть смерть. */
+    const alive = (): void => {
+      if (aliveTimer !== null) clearTimeout(aliveTimer)
+      if (killed || stopped) return
+      aliveTimer = setTimeout(() => {
+        aliveTimer = null
+        void fell(`воркер молчит дольше ${POSE.aliveTimeoutMs} мс`)
+      }, POSE.aliveTimeoutMs)
     }
 
     // Рабочий обмен сообщениями: `ready` уже получен, дальше идут позы.
     w.onmessage = (e: MessageEvent): void => {
       const m = e.data as FromWorker
+      alive()
       if (m.type === 'pose') {
         inFlight = false
         emit(pipelineId(p), m.lm, {
@@ -513,8 +593,21 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
         return
       }
       if (m.type === 'pose.error') {
-        // Одна ошибка — ещё не отказ: в журнал, но лестницу не двигаем.
-        write(poseFail({ pipeline: pipelineId(p), message: `${m.stage}: ${m.message}` }))
+        /*
+         * Одна ошибка — ещё НЕ отказ: лестницу не двигаем. И событие своё, не
+         * `pose.fail`: иначе разбор журнала читал бы одиночный закрытый кадр
+         * как сошедшую ступень. Счёт до пяти подряд ведёт воркер, он же и
+         * пришлёт `fail`.
+         */
+        write(
+          poseError({
+            pipeline: pipelineId(p),
+            stage: m.stage,
+            name: m.name,
+            message: m.message,
+            seq: m.seq,
+          }),
+        )
         return
       }
       if (m.type === 'fail') {
@@ -524,6 +617,13 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
     w.onerror = (e: ErrorEvent): void => {
       void fell(`worker: ${String(e.message || e.type)}`)
     }
+
+    /*
+     * Сторож взводится СРАЗУ, а не с первого сообщения: воркер, умерший сразу
+     * после `ready`, не пришлёт ни одного — а это ровно тот случай, ради
+     * которого сторож и поставлен.
+     */
+    alive()
 
     if (p.mode === 'bitmap') {
       /*
@@ -598,22 +698,40 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
     const initMs = Math.round(performance.now() - t0)
 
     const clock = makeClock()
-    const warmupMs = warmup(landmarker, clock)
+    /*
+     * Прогрев кормит часы ТЕМ ЖЕ источником времени, что и живой инференс.
+     * На главном потоке это просто `performance.now()` — поправки нет, в
+     * отличие от воркера, — но передаётся он всё равно снаружи: расхождение
+     * двух баз времени `VIDEO`-режим MediaPipe не объявляет, оно проявляется
+     * странным трекингом в первые секунды. См. `warmup` в `./pack`.
+     */
+    const nowMain = (): number => performance.now()
+    const warmupMs = warmup(landmarker, clock, nowMain)
 
     let timer: ReturnType<typeof setTimeout> | null = null
     let killed = false
-    let errors = 0
+    /*
+     * Счётчик ошибок — ТОТ ЖЕ, что у воркера (`makeErrorRun`, один порог
+     * `ERRORS_BEFORE_NEXT`). Раньше здесь стояло своё число `5` в коде, а тест
+     * проверял третий счётчик, который в бою не вызывал никто: правка порога
+     * не меняла ничего, и прогон оставался зелёным.
+     */
+    const errorRun = makeErrorRun()
 
     const step = (): void => {
       if (killed || stopped) return
       const tCap = performance.now()
       let lm: Float32Array | null = null
+      /** Пятая ошибка подряд: ступень сошла. Переменная живёт один кадр. */
+      let fallen = false
       try {
         lm = packLandmarks(landmarker.detectForVideo(video, clock(tCap)))
-        errors = 0
+        errorRun.onSuccess()
       } catch (e) {
-        errors++
-        write(poseFail({ pipeline: pipelineId(p), message: `infer: ${says(e)}` }))
+        fallen = errorRun.onError()
+        // Одиночная ошибка — своё событие, не `pose.fail`: иначе разбор
+        // журнала читает закрытый кадр как сошедшую ступень.
+        write(poseError({ pipeline: pipelineId(p), stage: 'infer', message: says(e) }))
       }
       const tDone = performance.now()
       emit(pipelineId(p), lm, {
@@ -624,10 +742,9 @@ async function startCamera(opts: PoseSourceOpts, hz: number): Promise<Stop> {
         w: video.videoWidth || null,
         h: video.videoHeight || null,
       })
-      if (errors >= 5) {
+      if (fallen) {
         // Ниже этой ступени лестницы нет, но сказать об этом обязаны.
-        errors = 0
-        void fell('пять ошибок инференса подряд на главном потоке')
+        void fell(`${ERRORS_BEFORE_NEXT} ошибок инференса подряд на главном потоке`)
         return
       }
       timer = setTimeout(step, 1000 / POSE.hzMainThread)
