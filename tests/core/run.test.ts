@@ -532,3 +532,121 @@ test('часов внутри автоматов нет вовсе', () => {
     expect(clocks.test(src), file).toBe(false)
   }
 })
+
+/*
+ * Ручная пауза — та, которую попросил человек кнопкой, а не присутствие.
+ * Модель взята из `run-game`: ручная и автоматическая различаются ПОЛЕМ, и
+ * меню паузы («Продолжить», «В меню») показывается только на ручной. На
+ * автопаузе ребёнок всего лишь вышел из кадра, и бросать забег нельзя.
+ */
+describe('ручная пауза', () => {
+  /** То же исчезновение игрока, что у автопаузы: нужно для сравнения с ней. */
+  const firstLost = START + 1_000
+  const lostFrom = ticks(START, START + 20_000).find((t) => t >= firstLost)!
+  const vanish: How = (t, pose, i) => (t >= firstLost ? null : right(t, pose, i))
+
+  test('останавливает время забега, как и автоматическая', () => {
+    const run = makeRun(opts())
+    const going = drive(run, START, START + 1_000, right)
+    expect(going.phase).toBe('running')
+
+    const s = run.pauseManual(START + 1_000)
+    expect(s.phase).toBe('paused')
+    const frozen = s.elapsedMs
+
+    // Кадры идут, ребёнок виден — время всё равно стоит: пауза ручная.
+    const later = drive(run, START + 1_000 + PERIOD, START + 5_000, right)
+    expect(later.phase).toBe('paused')
+    expect(later.elapsedMs).toBe(frozen)
+  })
+
+  test('различается от автоматической ПОЛЕМ, а не догадкой по причине', () => {
+    // На этом держится всё поведение меню паузы: показать «В меню» на
+    // автопаузе значило бы предложить бросить забег из-за того, что ребёнок
+    // на секунду отвернулся.
+    const run = makeRun(opts())
+    drive(run, START, START + 1_000, right)
+    const s = run.pauseManual(START + 1_000)
+    expect(s.manual).toBe(true)
+    expect(s.pauseWhy).toBeNull()
+
+    const auto = makeRun(opts())
+    const a = drive(auto, START, lostFrom + CONFIG.presence.pauseMs + PERIOD, vanish)
+    expect(a.phase).toBe('paused')
+    expect(a.manual).toBe(false)
+    expect(a.pauseWhy).not.toBeNull()
+  })
+
+  test('прерванный раунд даёт skip, а не провал: игра его не судила', () => {
+    const run = makeRun(opts())
+    drive(run, START, START + 1_000, right)
+    const s = run.pauseManual(START + 1_000)
+    expect(s.outcomes.length).toBe(1)
+    expect(s.outcomes[0].kind).toBe('skip')
+    expect(s.outcomes[0].verdict).toBeNull()
+    expect(s.score).toBe(0)
+  })
+
+  test('ребёнок стоит на месте — возврат разрешён сразу', () => {
+    /*
+     * Присутствие подтверждено ещё кадрами ДО паузы: ребёнок никуда не
+     * уходил, он нажал кнопку и стоит. Требовать от него заново «постоять
+     * видимым» было бы наказанием за собственную кнопку. Отсчёт «3, 2, 1»
+     * всё равно рисует оболочка — ядро лишь говорит, что возврат возможен.
+     */
+    const run = makeRun(opts())
+    drive(run, START, START + 1_000, right)
+    const s = run.pauseManual(START + 1_000)
+    expect(s.canResume).toBe(true)
+    const back = run.resume(START + 1_000)
+    expect(back.phase).toBe('running')
+    expect(back.manual).toBe(false)
+  })
+
+  test('ребёнок ушёл, пока стояла пауза — возврат ОТКАЗАН, пока не вернётся', () => {
+    /*
+     * Он нажал кнопку и ушёл, и это обычный случай: пауза затем и нужна.
+     * Бросать его сразу под стену нечестно, поэтому возврат — через то же
+     * подтверждение присутствия, что и после автопаузы (урок `run-game`).
+     */
+    const run = makeRun(opts())
+    drive(run, START, START + 1_000, right)
+    run.pauseManual(START + 1_000)
+
+    // Ушёл: кадров без игрока хватает, чтобы подтверждение истекло.
+    const gone = drive(run, START + 1_000 + PERIOD, START + 4_000, () => null)
+    expect(gone.phase).toBe('paused')
+    expect(gone.manual).toBe(true)
+    expect(gone.canResume).toBe(false)
+    expect(() => run.resume(START + 4_000)).toThrow()
+
+    // Вернулся — снова можно.
+    const seen = drive(run, START + 4_000 + PERIOD, START + 4_000 + CONFIG.presence.resumeMs + 500, right)
+    expect(seen.canResume).toBe(true)
+    expect(run.resume(START + 4_000 + CONFIG.presence.resumeMs + 500).phase).toBe('running')
+  })
+
+  test('повторный вызов ничего не портит: пауза уже стоит', () => {
+    const run = makeRun(opts())
+    drive(run, START, START + 1_000, right)
+    const first = run.pauseManual(START + 1_000)
+    const again = run.pauseManual(START + 1_000)
+    expect(again.elapsedMs).toBe(first.elapsedMs)
+    // Второго `skip` не появилось: раунд закрыт один раз.
+    expect(again.outcomes.length).toBe(first.outcomes.length)
+  })
+
+  test('на законченном забеге ничего не делает, а не ломает его', () => {
+    const run = makeRun(opts({ durationSec: 1 }))
+    const done = drive(run, START, START + 20_000, right)
+    expect(done.phase).toBe('finished')
+    const s = run.pauseManual(START + 20_000)
+    expect(s.phase).toBe('finished')
+  })
+
+  test('время назад не идёт и здесь: это дефект оболочки, а не повод молчать', () => {
+    const run = makeRun(opts())
+    drive(run, START, START + 1_000, right)
+    expect(() => run.pauseManual(START + 500)).toThrow()
+  })
+})

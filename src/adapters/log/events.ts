@@ -189,8 +189,42 @@ export type HealthData = {
 
 export const health = (d: HealthData): Of<'health', HealthData> => ({ type: 'health', data: d })
 
-export const pause = (d: { why: PresenceReason }): Of<'pause', { why: PresenceReason }> => ({
+/**
+ * Причина паузы. `manual` — её попросил человек кнопкой, остальные приходят от
+ * присутствия.
+ *
+ * Ручная пауза пишется В ТО ЖЕ событие, а не в своё: сводка считает паузы по
+ * причинам, и отдельное событие дало бы журнал, расходящийся с самим собой —
+ * «пауз ноль» рядом с записью о паузе. Так же сделано в `run-game`.
+ */
+export type PauseWhy = PresenceReason | 'manual'
+
+export const pause = (d: { why: PauseWhy }): Of<'pause', { why: PauseWhy }> => ({
   type: 'pause',
+  data: d,
+})
+
+/**
+ * Забег прерван и НЕ дошёл до конца: взрослый вышел в меню с паузы.
+ *
+ * Отдельно от `run.finish`, а не полем в нём: прерванный забег результатом не
+ * является, и смешать их значило бы испортить и статистику, и калибровку
+ * порогов — половина забега без конца не говорит о порогах ничего.
+ *
+ * `where` — не украшение: журнал единственный свидетель, и «прервано с паузы»
+ * иначе не отличить от «прервано из меню». Приём из `run-game`.
+ */
+export type RunAbortData = {
+  where: 'pause' | 'menu'
+  /** Сколько игрового времени прошло до прерывания. */
+  elapsedMs: number
+  /** Раундов успели сыграть. */
+  rounds: number
+  score: number
+}
+
+export const runAbort = (d: RunAbortData): Of<'run.abort', RunAbortData> => ({
+  type: 'run.abort',
   data: d,
 })
 

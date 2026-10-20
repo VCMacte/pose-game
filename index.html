@@ -157,6 +157,49 @@
         text-shadow: 0 0 2vmin #000;
       }
 
+      /*
+        Кнопка паузы — в правом нижнем углу: палец ребёнка держит телефон
+        снизу, а верх экрана занят HUD через зеркалирование.
+      */
+      .pause-btn {
+        position: absolute;
+        right: 3vmin;
+        bottom: 3vmin;
+        font-size: 7vmin;
+        min-width: 16vmin;
+        min-height: 16vmin;
+        opacity: 0.75;
+      }
+
+      /* Меню паузы накрывает экран целиком: выбор здесь — единственное дело. */
+      .pause-menu {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 3vmin;
+        padding: 6vmin;
+        background: rgba(11, 16, 32, 0.92);
+        text-align: center;
+      }
+
+      .pause-menu h1 {
+        font-size: 9vmin;
+      }
+
+      .pause-menu p {
+        color: var(--dim);
+        margin: 0;
+      }
+
+      .pause-menu .play {
+        flex: 0 0 auto;
+        font-size: 7vmin;
+        padding: 3vmin 6vmin;
+      }
+
       small {
         color: var(--dim);
         font-weight: 400;

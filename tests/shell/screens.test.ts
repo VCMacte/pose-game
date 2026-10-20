@@ -405,3 +405,72 @@ describe('источник позы', () => {
     expect(text()).toMatch(/не запустился|Камеры нет/)
   })
 })
+
+/*
+ * Меню паузы. Модель взята из `run-game`: ручная пауза и автоматическая
+ * различаются полем, и меню показывается только на ручной.
+ */
+describe('меню паузы', () => {
+  /** Приложение с поднятым забегом и подконтрольным кадром экрана. */
+  function running(over: Parameters<typeof startApp>[1] = {}) {
+    let frameCb: ((t: number) => void) | null = null
+    const a = app({
+      raf: (cb) => {
+        frameCb = cb
+        return 1
+      },
+      renderer: () => ({ render: () => {} }),
+      ...over,
+    })
+    a.go('run')
+    return { a, frame: (t: number) => frameCb?.(t) }
+  }
+
+  test('на экране забега есть кнопка паузы', () => {
+    const { a } = running()
+    expect(byTest('pause')).not.toBeNull()
+    void a
+  })
+
+  test('меню паузы по умолчанию СКРЫТО: забег идёт', () => {
+    running()
+    expect(byTest('pause-menu')?.hidden).toBe(true)
+  })
+
+  test('в меню паузы есть «Продолжить» и «Вернуться в меню»', () => {
+    running()
+    expect(byTest('resume')).not.toBeNull()
+    expect(byTest('to-menu')).not.toBeNull()
+  })
+
+  test('«Вернуться в меню» уводит в меню и ПРЕРЫВАЕТ забег', () => {
+    /*
+     * Продолжать с середины нечего: ребёнок уже ушёл от камеры, а половина
+     * забега без конца результатом не является. Прерывание обязано быть
+     * записано — иначе забег выглядит в журнале оборванным без причины.
+     */
+    const wrote: string[] = []
+    const { a } = running({ write: (e) => void wrote.push(e.type) })
+    byTest('to-menu')!.click()
+    expect(a.screen()).toBe('menu')
+    expect(wrote).toContain('run.abort')
+    // Прерванный забег НЕ дописывается `run.finish`: он не результат.
+    expect(wrote).not.toContain('run.finish')
+  })
+
+  test('кнопка паузы не ломает экран, пока забег не начался', () => {
+    // Идёт калибровка: паузить нечего, и нажатие обязано быть безвредным.
+    const { a } = running()
+    expect(a.runStage()).toBe('calibration')
+    expect(() => byTest('pause')!.click()).not.toThrow()
+    expect(byTest('pause-menu')?.hidden).toBe(true)
+  })
+
+  test('уход с забега кнопкой «назад» тоже записывается как прерывание', () => {
+    const wrote: string[] = []
+    const { a } = running({ write: (e) => void wrote.push(e.type) })
+    // Забег ещё на калибровке — прерывать нечего, записи быть не должно.
+    a.go('menu')
+    expect(wrote.filter((t) => t === 'run.abort').length).toBe(0)
+  })
+})

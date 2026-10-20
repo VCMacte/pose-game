@@ -24,7 +24,7 @@ import { makeRun } from '../core/run'
 import type { Run, RunState } from '../core/run'
 import type { Calibration, Frame, Landmarks } from '../core/types'
 import { calibDone, calibNeed, pause as pauseEvent, resume as resumeEvent } from '../adapters/log/events'
-import { roundJudge, roundPreview, roundSkip, roundWall, runFinish, runStart } from '../adapters/log/events'
+import { roundJudge, roundPreview, roundSkip, roundWall, runAbort, runFinish, runStart } from '../adapters/log/events'
 import type { LogEvent, RawWhy } from '../adapters/log/store'
 import { rawBurst, rawPush, rawReset } from '../adapters/log/store'
 import { timingsFor } from '../adapters/settings'
@@ -92,6 +92,21 @@ export type Play = {
   hint(): string
   state(): RunState | null
   calibration(): Calibration | null
+  /**
+   * Пауза по просьбе человека. Пишет `pause {why:'manual'}` и всплеск строк
+   * скелета: пауза — второй интересный для разбора момент после провала.
+   */
+  pauseManual(t: number): void
+  /**
+   * Снять ручную паузу. `false` — возврат ещё не подтверждён присутствием
+   * (ребёнок не вернулся на место), и оболочка обязана показать это, а не
+   * делать вид, что нажатие не состоялось.
+   */
+  resume(t: number): boolean
+  /** Прервать забег: взрослый выходит в меню. Пишет `run.abort`. */
+  abort(where: 'pause' | 'menu'): void
+  /** Стоит ли РУЧНАЯ пауза: только на ней показывается меню паузы. */
+  manual(): boolean
 }
 
 /** Сколько очков за исход — из конфига, а не числом здесь. */
@@ -397,6 +412,51 @@ export function makePlay(deps: PlayDeps): Play {
       }
       return { scene, counts: { valid, lost: frames.length - valid } }
     },
+    pauseManual: (t) => {
+      const r = run
+      if (!r || r.state.phase !== 'running') return
+      const st = r.pauseManual(t)
+      write(pauseEvent({ why: 'manual' }))
+      pausedWhy = 'manual'
+      raw.burst('pause')
+      stage = 'paused'
+      hint = ''
+      // Исход прерванного раунда записывается тем же путём, что и всегда.
+      journal(st, t, null)
+    },
+
+    resume: (t) => {
+      const r = run
+      if (!r || r.state.phase !== 'paused') return false
+      if (!r.state.canResume) return false
+      r.resume(t)
+      write(resumeEvent({ afterMs: 0 }))
+      pausedWhy = null
+      stage = 'round'
+      hint = ''
+      return true
+    },
+
+    abort: (where) => {
+      const st = run?.state
+      write(
+        runAbort({
+          where,
+          elapsedMs: st?.elapsedMs ?? 0,
+          rounds: st?.outcomes.length ?? 0,
+          score: st?.score ?? 0,
+        }),
+      )
+      /*
+       * Забег НЕ дописывается `run.finish`: он результатом не является.
+       * Продолжать с середины тоже нечего — ребёнок уже ушёл от камеры, а
+       * половина забега без конца не говорит о порогах ничего. Это решение
+       * `run-game`, и оно здесь то же.
+       */
+      finished = true
+    },
+
+    manual: () => run?.state.manual ?? false,
     stage: () => stage,
     hint: () => hint,
     state: () => run?.state ?? null,

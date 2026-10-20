@@ -366,3 +366,155 @@ describe('звук исходов', () => {
     expect(heard).not.toContain('hit')
   })
 })
+
+/*
+ * Ручная пауза сквозь весь путь: ядро, журнал и признак, по которому оболочка
+ * решает, показывать ли меню. Модель `run-game`: ручная и автоматическая
+ * различаются ПОЛЕМ, и меню показывается только на ручной.
+ */
+describe('ручная пауза в забеге', () => {
+  /** Забег, которым можно управлять покадрово. */
+  function interactive(opts: { script?: FakeScript; tier: 1 | 2 | 3 }) {
+    const log: Row[] = []
+    const write = (e: { type: string; data: object }): void => {
+      log.push({ t: log.length, type: e.type, ...(e.data as Record<string, unknown>) })
+    }
+    const ring: Array<{ t: number; v: number[] }> = []
+
+    const settings = makeSettings({ store: memStore() })
+    settings.set('tier', opts.tier)
+    settings.set('durationSec', DURATION_S)
+    settings.set('latencyMs', 0)
+
+    const play = makePlay({
+      settings,
+      cal: CAL,
+      aspect: () => ASPECT,
+      write,
+      rnd: makeRnd(1),
+      wall: () => 1_760_000_000_000,
+      cameraId: 'fake-cam',
+      source: 'fake',
+      // Кольцо строк скелета своё: иначе всплеск уходит в настоящий журнал,
+      // который в node молчит, и проверить его нечем.
+      raw: {
+        push: (t, lm) => {
+          if (lm) ring.push({ t: Math.round(t), v: [] })
+        },
+        burst: (why) => {
+          if (ring.length === 0) return
+          write({ type: 'raw', data: { why, lines: ring.splice(0) } })
+        },
+        reset: () => void ring.splice(0),
+      },
+    })
+
+    /** Прогнать кадры верного игрока с `from` до `to`. */
+    const run = (from: number, to: number, present = true): void => {
+      for (let t = from; t <= to; t += 1000 / HZ) {
+        const pose = play.state()?.pose
+        const lm = present
+          ? stick({
+              ...(pose?.requires ?? {}),
+              ...(pose ? { orientation: pose.orientation } : {}),
+              facing: 'right',
+              aspect: ASPECT,
+            })
+          : null
+        play.step(t, [{ t, lm }])
+      }
+    }
+
+    return { play, log, run }
+  }
+
+  test('ручная пауза останавливает забег и пишется в журнал причиной manual', () => {
+    const { play, log, run } = interactive({ tier: 1 })
+    run(0, 1500)
+    expect(play.state()?.phase).toBe('running')
+
+    play.pauseManual(1500)
+    expect(play.state()?.phase).toBe('paused')
+    expect(play.manual()).toBe(true)
+
+    const pauses = log.filter((e) => e.type === 'pause')
+    expect(pauses.length).toBe(1)
+    expect(pauses[0].why).toBe('manual')
+
+    // Время забега стоит, хотя кадры идут и ребёнок виден.
+    const frozen = play.state()!.elapsedMs
+    run(1500 + 1000 / HZ, 5000)
+    expect(play.state()?.elapsedMs).toBe(frozen)
+  })
+
+  test('АВТОПАУЗА не ручная: меню паузы на ней не показывается', () => {
+    /*
+     * Главное различие. Ребёнок вышел из кадра — забег ждёт его, а не
+     * предлагает всё бросить: таких эпизодов за забег бывает несколько.
+     */
+    const { play, run } = interactive({ tier: 1 })
+    run(0, 1000)
+    // Ушёл — присутствие само просит паузу.
+    run(1000 + 1000 / HZ, 5000, false)
+    expect(play.state()?.phase).toBe('paused')
+    expect(play.manual()).toBe(false)
+    expect(play.state()?.pauseWhy).not.toBeNull()
+  })
+
+  test('возврат с ручной паузы продолжает забег и пишет resume', () => {
+    const { play, log, run } = interactive({ tier: 1 })
+    run(0, 1500)
+    play.pauseManual(1500)
+
+    expect(play.resume(1500)).toBe(true)
+    expect(play.state()?.phase).toBe('running')
+    expect(play.manual()).toBe(false)
+    expect(log.some((e) => e.type === 'resume')).toBe(true)
+  })
+
+  test('возврат ОТКАЗАН, пока ребёнок не вернулся в кадр', () => {
+    // Он нажал кнопку и ушёл — обычный случай, пауза затем и нужна.
+    const { play, run } = interactive({ tier: 1 })
+    run(0, 1500)
+    play.pauseManual(1500)
+    run(1500 + 1000 / HZ, 5000, false)
+
+    expect(play.state()?.canResume).toBe(false)
+    expect(play.resume(5000)).toBe(false)
+    expect(play.state()?.phase).toBe('paused')
+  })
+
+  test('прерывание пишет run.abort и НЕ пишет run.finish', () => {
+    // Прерванный забег результатом не является, и смешивать их нельзя: иначе
+    // половина забега без конца попадёт и в статистику, и в калибровку.
+    const { play, log, run } = interactive({ tier: 1 })
+    run(0, 3000)
+    play.pauseManual(3000)
+    play.abort('pause')
+
+    const abort = log.find((e) => e.type === 'run.abort')
+    expect(abort).toBeTruthy()
+    expect(abort!.where).toBe('pause')
+    expect(abort!.rounds).toBe(play.state()!.outcomes.length)
+    expect(log.some((e) => e.type === 'run.finish')).toBe(false)
+  })
+
+  test('раунд, прерванный ручной паузой, даёт skip, а не провал', () => {
+    // Приговор не вправе наказывать за то, чего игра не видела, — а она не
+    // судила этот раунд вовсе.
+    const { play, run } = interactive({ tier: 1 })
+    run(0, 1500)
+    play.pauseManual(1500)
+    const last = play.state()!.outcomes.at(-1)
+    expect(last?.kind).toBe('skip')
+    expect(last?.verdict).toBeNull()
+    expect(play.state()!.score).toBe(0)
+  })
+
+  test('пауза даёт всплеск строк скелета: это интересный для разбора момент', () => {
+    const { play, log, run } = interactive({ tier: 1 })
+    run(0, 1500)
+    play.pauseManual(1500)
+    expect(log.some((e) => e.type === 'raw' && e.why === 'pause')).toBe(true)
+  })
+})

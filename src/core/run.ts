@@ -136,6 +136,16 @@ export type RunState = {
   /** Причина отказа присутствия, по которой встала пауза; `null` — паузы нет. */
   pauseWhy: PresenceReason | null
   /**
+   * Паузу попросил ЧЕЛОВЕК, а не присутствие.
+   *
+   * Различие полем, а не догадкой по `pauseWhy`: на нём держится всё поведение
+   * меню паузы. Показать «Вернуться в меню» на автопаузе значило бы предложить
+   * бросить забег из-за того, что ребёнок на секунду отвернулся, — а таких
+   * эпизодов за забег бывает несколько. Приём взят из `run-game`, где он же
+   * отделяет ручную паузу от автоматической.
+   */
+  manual: boolean
+  /**
    * Возврат подтверждён: ребёнок непрерывно виден `presence.resumeMs`, и
    * оболочка может начинать отсчёт «3, 2, 1». Забег при этом ОСТАЁТСЯ на
    * паузе, а `elapsedMs` стоит, пока не будет позван `resume`. Вне паузы —
@@ -187,6 +197,8 @@ export type Run = {
    * расписание нового раунда. Назад время не идёт.
    */
   resume(t: number): RunState
+  /** Пауза по просьбе человека. См. реализацию. */
+  pauseManual(t: number): RunState
   readonly state: RunState
 }
 
@@ -215,6 +227,8 @@ export function makeRun(opts: RunOpts): Run {
   let buffer: CheckedFrame[] = []
 
   let pauseWhy: PresenceReason | null = null
+  /** Паузу попросил человек. Снимается только возвратом. */
+  let manual = false
   /** Причина отказа последнего негодного кадра — ею называется причина паузы. */
   let lastWhy: PresenceReason = 'none'
   let now = startT
@@ -322,6 +336,7 @@ export function makeRun(opts: RunOpts): Run {
   function resumeAt(t: number): void {
     phase = 'running'
     pauseWhy = null
+    manual = false
     runningSince = t
     startRound(t, pending ?? pick())
     pending = null
@@ -404,6 +419,7 @@ export function makeRun(opts: RunOpts): Run {
       roundPhase: round === null ? null : round.phaseAt(t),
       score,
       pauseWhy,
+      manual,
       canResume: at('paused') && resumeReady(pst, t),
       outcomes: [...outcomes],
     }
@@ -460,6 +476,37 @@ export function makeRun(opts: RunOpts): Run {
       pauseGate(t)
 
       advance(t)
+      return snapshot(t)
+    },
+
+    /**
+     * Пауза по просьбе человека: кнопка «Пауза» на экране забега.
+     *
+     * Часы забега встают так же, как на автопаузе, и прерванный раунд даёт
+     * `skip`, а не провал: игра его не судила. Возврат — через тот же
+     * `resume`, то есть с тем же подтверждением присутствия. Это не
+     * придирчивость: ребёнок нажал кнопку и ушёл, и бросать его сразу под
+     * стену нечестно — прямой урок `run-game`.
+     *
+     * На законченном забеге и на уже стоящей паузе не делает НИЧЕГО: кнопку
+     * нажимают пальцем, и второе касание не обязано ничего ломать. Назад
+     * время не идёт — как и в `resume`, это бросает: backwards `t` всегда
+     * дефект оболочки, и он должен быть виден там, где сделан.
+     */
+    pauseManual(t: number): RunState {
+      if (!Number.isFinite(t)) throw new Error('pauseManual: t обязан быть числом')
+      if (t < now) throw new Error(`pauseManual: время идёт назад (${t} < ${now})`)
+      if (!at('running')) return snapshot(now)
+      now = t
+      manual = true
+      pauseAt(t)
+      /*
+       * `pauseAt` ставит `pauseWhy` последней причиной присутствия, а у ручной
+       * паузы причины НЕТ: ребёнок виден, его просто попросили подождать.
+       * Оставить там чужую причину значило бы показать ему «тебя не видно» на
+       * паузе, которую он сам и поставил.
+       */
+      pauseWhy = null
       return snapshot(t)
     },
 

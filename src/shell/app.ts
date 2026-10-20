@@ -131,6 +131,11 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   let loop: Loop | null = null
   let rs: RunScreen | null = null
   let play: Play | null = null
+  /**
+   * Время последнего кадра экрана. Им ставится ручная пауза: нажатие кнопки
+   * происходит между кадрами, а ядру нужен момент в той же шкале, что и `tick`.
+   */
+  let lastFrameT = 0
   /** Как погасить источник позы. `null` — он ещё не поднялся или уже погашен. */
   let stopPose: (() => Promise<void>) | null = null
   /**
@@ -161,7 +166,31 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   }
 
   function startFrames(): void {
-    const screenRun = runScreen()
+    /*
+     * Часы берутся те же, по которым идёт такт экрана: ручная пауза ставится в
+     * ИГРОВОЕ время, и взять их из другого источника значило бы попросить ядро
+     * остановиться в момент, которого оно не видело.
+     */
+    const screenRun = runScreen({
+      onPause: () => {
+        play?.pauseManual(lastFrameT)
+        refreshPause()
+      },
+      onResume: () => {
+        // `false` — возврат не подтверждён: меню остаётся, кнопка отключена.
+        play?.resume(lastFrameT)
+        refreshPause()
+      },
+      /*
+       * Выход в меню ПРЕРЫВАЕТ забег, и это намеренно: продолжать с середины
+       * нечего — ребёнок уже ушёл от камеры, а половина забега без конца
+       * результатом не является. Решение `run-game`, и здесь оно то же.
+       */
+      onMenu: () => {
+        play?.abort('pause')
+        go('menu')
+      },
+    })
     rs = screenRun
 
     let renderer: Renderer | null = null
@@ -230,9 +259,11 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
 
     const theLoop = makeLoop({
       step: (t, frames) => {
+        lastFrameT = t
         const got = thePlay.step(t, frames)
         stage = thePlay.stage()
         screenRun.say(thePlay.hint())
+        refreshPause()
         // Сцена `null` — рисовать нечего (идёт калибровка или нет кадра).
         if (got.scene && renderer) renderer.render(got.scene)
         // Снятая калибровка переживает забег: ребёнок не сдаёт её каждый раз.
@@ -250,6 +281,18 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     rafId = raf(tick)
 
     root.replaceChildren(screenRun.root)
+  }
+
+  /**
+   * Меню паузы — только на РУЧНОЙ паузе.
+   *
+   * На автопаузе ребёнок всего лишь вышел из кадра, и предлагать там «вернуться
+   * в меню» значило бы предлагать бросить забег из-за секундной отлучки.
+   */
+  function refreshPause(): void {
+    if (!rs || !play) return
+    const manual = play.manual()
+    rs.pauseMenu(manual, play.state()?.canResume ?? false)
   }
 
   function draw(): void {
@@ -317,6 +360,14 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
 
   function go(next: ScreenName): void {
     if (stopped) return
+    /*
+     * Уход с забега НЕ ЧЕРЕЗ меню паузы — тоже прерывание, и оно обязано быть
+     * записано: иначе забег выглядел бы в журнале оборванным без причины.
+     * Случай настоящий: взрослый нажимает кнопку телефона «назад».
+     */
+    if (screen === 'run' && next !== 'run' && play && play.state()?.phase === 'running') {
+      play.abort('menu')
+    }
     screen = next
     draw()
   }
