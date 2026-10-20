@@ -4,8 +4,8 @@
 и перед добавлением нового модуля.
 
 Родитель: [`../CLAUDE.md`](../CLAUDE.md).
-Код: `tests/boundaries.test.ts`, `src/core/*` (пишется), `src/fake/*`;
-запланированы, ещё не написаны — `src/adapters/*`, `src/shell/*`.
+Код: `tests/boundaries.test.ts`, `src/core/*`, `src/adapters/*`, `src/shell/*`,
+`src/fake/*`.
 Замысел: [`concept-and-plan.md`](concept-and-plan.md).
 
 ## Почему не FSD и не DDD

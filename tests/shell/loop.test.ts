@@ -73,40 +73,64 @@ describe('два независимых такта', () => {
   })
 
   test('сводка здоровья пишется раз в секунду, а не каждый кадр', () => {
-    // Журнал с сводкой на каждый кадр упёрся бы в потолок за один забег.
-    const loop = makeLoop({ step: () => ({ valid: 1, lost: 0 }) })
-    for (let t = 0; t < 900; t += 16) loop.frame(t)
-    // Ровно столько, сколько секунд прошло: проверяется через счётчик кадров,
-    // потому что журнал в node выключен и наружу молчит.
-    expect(loop.pending()).toBe(0)
+    /*
+     * Проверяется ЧЕРЕЗ ЖУРНАЛ, который для этого и подменяется. Прошлая
+     * версия утверждала то же, а проверяла `pending() === 0` — то есть
+     * проходила и при записи на каждом кадре, и при полном её отсутствии.
+     */
+    const wrote: Array<Record<string, unknown>> = []
+    const loop = makeLoop({ step: () => ({ valid: 1, lost: 0 }), write: (e) => wrote.push(e) })
+    /*
+     * Две с половиной секунды кадров по 16 мс. Запись приходится на первый
+     * кадр, у которого от прошлой записи прошла секунда (≈1008 и ≈2016 мс),
+     * поэтому ровно две за этот отрезок — и ни одной лишней.
+     */
+    for (let t = 0; t <= 2500; t += 16) loop.frame(t)
+    expect(wrote.length).toBe(2)
+    expect(wrote[0].type).toBe('health')
   })
 
-  test('числа валидных и потерянных берутся у ЯДРА, а не выдумываются', () => {
+  test('числа валидных и потерянных попадают в журнал, а не выдумываются', () => {
     // Выдуманные числа в журнале хуже отсутствующих: по ним потом объясняют,
-    // почему раунд не судился.
-    let asked = 0
-    const loop = makeLoop({
-      step: () => {
-        asked++
-        return { valid: 7, lost: 2 }
-      },
-    })
-    loop.frame(0)
-    loop.frame(16)
-    expect(asked).toBe(2)
+    // почему раунд не судился. Прошлая версия считала лишь ВЫЗОВЫ `step`.
+    const wrote: Array<Record<string, unknown>> = []
+    const loop = makeLoop({ step: () => ({ valid: 7, lost: 2 }), write: (e) => wrote.push(e) })
+    for (let t = 0; t <= 1000; t += 100) loop.frame(t)
+    expect(wrote.length).toBe(1)
+    const data = wrote[0].data as Record<string, number>
+    expect(data.valid).toBe(7 * 11)
+    expect(data.lost).toBe(2 * 11)
   })
 
-  test('сводка от источника позы принимается, а не считается на месте', () => {
+  test('сводка от источника позы попадает в журнал, а не теряется', () => {
     // Инференс идёт в воркере: главный поток о его длительности знает только
-    // по сообщению `beat`.
-    const loop = makeLoop({ step: () => undefined })
-    expect(() => loop.noteBeat({ p50: 18, p95: 40, dropped: 3 })).not.toThrow()
+    // по сообщению `beat`. Прошлая версия проверяла лишь `not.toThrow()`.
+    const wrote: Array<Record<string, unknown>> = []
+    const loop = makeLoop({ step: () => undefined, write: (e) => wrote.push(e) })
+    loop.noteBeat({ p50: 18, p95: 40, dropped: 3 })
+    loop.noteBeat({ p50: 21, p95: 44, dropped: 2 })
+    for (let t = 0; t <= 1000; t += 100) loop.frame(t)
+    const data = wrote[0].data as Record<string, number>
+    expect(data.inferP50).toBe(21)
+    expect(data.inferP95).toBe(44)
+    // Отбросы СКЛАДЫВАЮТСЯ за секунду, а не затираются последним сообщением.
+    expect(data.drops).toBe(5)
   })
 
-  test('первый кадр экрана не считает секунду от нуля часов', () => {
-    // `performance.now()` на старте забега — не ноль, и сводка «за 40 секунд»
-    // в первую же секунду была бы ложью.
-    const loop = makeLoop({ step: () => undefined })
-    expect(() => loop.frame(123456)).not.toThrow()
+  test('первый кадр экрана не считает секунду от НУЛЯ часов', () => {
+    /*
+     * `performance.now()` на старте забега — не ноль. Если отсчёт секунды
+     * ведётся от нуля, первый же кадр «опаздывает» на всё время работы
+     * страницы и сводка пишется немедленно, за якобы сотни секунд. Прошлая
+     * версия проверяла лишь `not.toThrow()`.
+     */
+    const wrote: Array<Record<string, unknown>> = []
+    const loop = makeLoop({ step: () => undefined, write: (e) => wrote.push(e) })
+    loop.frame(123456)
+    expect(wrote.length).toBe(0)
+    loop.frame(123456 + 500)
+    expect(wrote.length).toBe(0)
+    loop.frame(123456 + 1000)
+    expect(wrote.length).toBe(1)
   })
 })

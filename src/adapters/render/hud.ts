@@ -8,6 +8,7 @@
  * Разбор: `docs/render-and-layout.md`.
  */
 
+import { CONFIG } from '../../core/config'
 import type { PresenceReason } from '../../core/presence'
 import { RENDER, safeArea } from './figure'
 import { PALETTE } from './wall'
@@ -55,9 +56,22 @@ export type HudScene = {
   paused?: { why: PresenceReason }
 }
 
-/** Прибавка очков словами приговора. `skip` не показывает ничего. */
-const delta = (kind: 'hit' | 'miss' | 'skip'): string | null =>
-  kind === 'hit' ? '+3' : kind === 'miss' ? '−2' : null
+/**
+ * Прибавка очков словами приговора. `skip` не показывает ничего — её и не было.
+ *
+ * **Числа берутся из `CONFIG.score`, а не записаны здесь строками.** Это
+ * инвариант «один факт живёт в одном месте», и он уже был здесь нарушен:
+ * HUD печатал `+3` / `−2`, а начисляет очки `score.ts` из конфига. Смена
+ * `CONFIG.score.hit` давала ребёнку одно число на экране и другое в счёте.
+ *
+ * Минус рисуется типографским «−» (U+2212), а не дефисом: на телевизоре через
+ * зеркалирование дефис в крупном кегле читается как точка.
+ */
+function delta(kind: 'hit' | 'miss' | 'skip'): string | null {
+  if (kind === 'hit') return `+${CONFIG.score.hit}`
+  if (kind === 'miss') return `−${Math.abs(CONFIG.score.miss)}`
+  return null
+}
 
 export function drawHud(ctx: CanvasRenderingContext2D, s: HudScene): void {
   const safe = safeArea()

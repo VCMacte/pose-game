@@ -4,8 +4,7 @@
 переиспользования между забегами и условий устаревания.
 
 Родитель: [`../CLAUDE.md`](../CLAUDE.md).
-Код (запланирован, ещё не написан): `src/core/calibration.ts`,
-`src/shell/screens/run.ts`.
+Код: `src/core/calibration.ts`, `src/shell/screens/run.ts`.
 Замысел: [`concept-and-plan.md`](concept-and-plan.md).
 
 ## Одна стадия, пять секунд

@@ -4,6 +4,8 @@
  *
  * Разбор: `docs/menu-and-settings.md`.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { beforeEach, describe, expect, test } from 'vitest'
 
 import { startApp } from '../../src/shell/app'
@@ -97,10 +99,26 @@ describe('вход на экраны взрослого', () => {
     expect(a.screen()).not.toBe('menu')
   })
 
-  test('никакого распознавателя удержания в оболочке не осталось', () => {
-    // Сторож против возврата ритуала «заодно, на всякий случай».
+  test('вход срабатывает от ОДНОГО клика, без удержания', () => {
+    /*
+     * Сторож против возврата ритуала. Прошлая версия проверяла отсутствие
+     * поля `longPress` у объекта, у типа которого такого поля нет вовсе, —
+     * то есть не могла не пройти.
+     *
+     * Проверяется наблюдаемое поведение: экран меняется на первом же клике, а
+     * не после паузы и не после второго.
+     */
     const a = app()
-    expect((a as unknown as Record<string, unknown>).longPress).toBeUndefined()
+    expect(a.screen()).toBe('menu')
+    byTest('adult')!.dispatchEvent(new MouseEvent('click', { bubbles: true }))
+    expect(a.screen()).toBe('settings')
+  })
+
+  test('в исходниках оболочки нет распознавателя удержания', () => {
+    // Вторая половина того же сторожа, уже по коду: ритуал возвращают не
+    // переименованием кнопки, а новым таймером «подержи подольше».
+    const src = readFileSync(join(__dirname, '..', '..', 'src', 'shell', 'app.ts'), 'utf8')
+    expect(src).not.toMatch(/longPress|holdMs|cornerFrac/)
   })
 
   test('с экранов взрослого есть путь назад', () => {

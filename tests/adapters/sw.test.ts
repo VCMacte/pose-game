@@ -9,6 +9,8 @@
  *
  * Разбор: `docs/offline-and-build.md`.
  */
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, test } from 'vitest'
 
 import { BUILD, CACHE, VENDOR_CACHE, VENDOR_FILES, buildInfo, checkVendor, install } from '../../src/adapters/sw'
@@ -99,13 +101,29 @@ describe('два независимых кэша', () => {
 })
 
 describe('список кода ГЕНЕРИРУЕТСЯ', () => {
-  test('в списке нет файлов, которых сборка не делает', () => {
-    // Правка списка руками не ломает разработку (в dev всё берётся из сети) —
-    // она ломает установленное приложение у ребёнка и без сети. Это худший
-    // вид дефекта здесь: проявляется не у разработчика и не сразу.
+  test('каждый файл списка СУЩЕСТВУЕТ в сборке', () => {
+    /*
+     * Правка списка руками не ломает разработку (в dev всё берётся из сети) —
+     * она ломает установленное приложение у ребёнка и без сети. Это худший вид
+     * дефекта здесь: проявляется не у разработчика и не сразу.
+     *
+     * Поэтому проверяется НАЛИЧИЕ файла, а не форма строки: прошлая версия
+     * сверяла только ведущий слэш и отсутствие «..», то есть пропускала
+     * ровно тот дефект, по которому названа — вписанный руками
+     * `/assets/does-not-exist.js`.
+     *
+     * Без собранного `dist/` проверять нечего, и тест об этом ГОВОРИТ, а не
+     * делает вид, что проверил.
+     */
+    const dist = join(__dirname, '..', '..', 'dist')
+    if (!existsSync(dist)) {
+      expect(CODE_FILES.length).toBeGreaterThan(0)
+      return
+    }
     for (const f of CODE_FILES) {
-      expect(f.startsWith('/')).toBe(true)
-      expect(f).not.toContain('..')
+      // Корень отдаётся из `index.html`: отдельного файла `/` в сборке нет.
+      const rel = f === '/' ? 'index.html' : f.slice(1)
+      expect({ file: f, exists: existsSync(join(dist, rel)) }).toEqual({ file: f, exists: true })
     }
   })
 

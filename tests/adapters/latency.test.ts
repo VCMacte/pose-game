@@ -143,6 +143,14 @@ describe('серия выстрелов', () => {
     expect(r.shots.length).toBe(4)
   })
 
+  test('один выстрел — это два: медиана по одному не медиана', async () => {
+    // `shots: 1` раньше отказывал ВСЕГДА, даже на идеальной петле: потолок
+    // «услышать не меньше двух» был выше числа выстрелов.
+    const r = await measureLatency({ shots: 1, loopback: loop([100, 100]) })
+    expect(r.shots.length).toBe(2)
+    expect(r.medianMs).toBe(100)
+  })
+
   test('тишина в ОТВЕТ НА ВСЁ — отказ, а не случайное число', async () => {
     await expect(measureLatency({ shots: 4, loopback: loop([null, null, null, null]) })).rejects.toThrow()
   })

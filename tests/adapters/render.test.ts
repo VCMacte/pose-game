@@ -20,10 +20,13 @@ import { describe, expect, test } from 'vitest'
 import { createRenderer } from '../../src/adapters/render/canvas'
 import type { Scene } from '../../src/adapters/render/canvas'
 import { RENDER, placeFigure, safeArea } from '../../src/adapters/render/figure'
-import { wallBox } from '../../src/adapters/render/wall'
+import { drawPreview, drawWall, wallBox } from '../../src/adapters/render/wall'
 import { figure } from '../../src/core/figure'
+import { stick } from '../../src/fake/stick'
 import { POSES } from '../../src/core/poses'
+import { CONFIG } from '../../src/core/config'
 import type { Pt } from '../../src/core/types'
+import { LANDMARK_COUNT, LANDMARK_STRIDE, LM, pointAt } from '../../src/core/landmarks'
 
 // ───────────────────────── поддельный контекст ─────────────────────────
 
@@ -92,6 +95,16 @@ function tape(): { ctx: CanvasRenderingContext2D; entries: Entry[] } {
   return { ctx, entries }
 }
 
+/**
+ * Слой с альфой, на котором собирается стена с вырезом. Отдельный именно
+ * потому, что главный контекст просят БЕЗ альфы.
+ */
+function fakeLayer(): { layer: { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D }; entries: Entry[] } {
+  const { ctx, entries } = tape()
+  const canvas = { width: RENDER.width, height: RENDER.height } as HTMLCanvasElement
+  return { layer: { canvas, ctx }, entries }
+}
+
 /** Поддельный canvas: рендер обязан сам выставить размеры буфера. */
 function fakeCanvas(ctx: CanvasRenderingContext2D): {
   el: HTMLCanvasElement
@@ -111,6 +124,18 @@ function fakeCanvas(ctx: CanvasRenderingContext2D): {
 }
 
 const calls = (e: Entry[], m: string): Entry[] => e.filter((x) => x.kind === 'call' && x.m === m)
+
+/**
+ * Рендер с подставленным слоем. Слой обязателен всегда: по умолчанию он
+ * создаётся через `document`, которого в node нет, — а главное, собрать вырез
+ * без слоя с альфой невозможно в принципе (см. `drawWall`).
+ */
+function renderer(el: HTMLCanvasElement, layerCtx?: CanvasRenderingContext2D) {
+  const lay = layerCtx
+    ? { canvas: { width: RENDER.width, height: RENDER.height } as HTMLCanvasElement, ctx: layerCtx }
+    : fakeLayer().layer
+  return createRenderer(el, { makeLayer: () => lay })
+}
 
 const SPEC = POSES[0]
 
@@ -217,7 +242,7 @@ describe('буфер и контекст', () => {
     const { ctx } = tape()
     const { el } = fakeCanvas(ctx)
     ;(globalThis as { devicePixelRatio?: number }).devicePixelRatio = 3
-    createRenderer(el)
+    renderer(el)
     expect(el.width).toBe(1280)
     expect(el.height).toBe(720)
   })
@@ -225,7 +250,7 @@ describe('буфер и контекст', () => {
   test('контекст просят без альфы и с desynchronized', () => {
     const { ctx } = tape()
     const { el, asked } = fakeCanvas(ctx)
-    createRenderer(el)
+    renderer(el)
     expect(asked[0]).toEqual({ kind: '2d', o: { alpha: false, desynchronized: true } })
   })
 
@@ -241,7 +266,7 @@ describe('дисциплина покадрового пути', () => {
     // уже поделённый между инференсом и кодировщиком.
     const { ctx, entries } = tape()
     const { el } = fakeCanvas(ctx)
-    const r = createRenderer(el)
+    const r = renderer(el)
     for (const phase of ['preview', 'wall', 'freeze', 'verdict'] as const) {
       r.render(scene({ phase, verdict: phase === 'verdict' ? 'hit' : undefined }))
     }
@@ -257,21 +282,45 @@ describe('дисциплина покадрового пути', () => {
     // Непарный save копит стек контекста кадр за кадром.
     const { ctx, entries } = tape()
     const { el } = fakeCanvas(ctx)
-    createRenderer(el).render(scene())
+    renderer(el).render(scene())
     expect(calls(entries, 'save').length).toBe(calls(entries, 'restore').length)
   })
 })
 
 describe('фигура — одна на превью и на вырез', () => {
   test('превью и вырез строятся из ОДНОЙ фигуры', () => {
-    // Две копии геометрии разъехались бы, и ребёнок не попадал бы в вырез,
-    // который видит. Поэтому сравниваются сами уложенные точки.
-    const box = { x: 0, y: 0, w: 400, h: 400 }
-    const a = placeFigure(figure(SPEC), box)
-    const b = placeFigure(figure(SPEC), box)
-    expect(b.bones).toEqual(a.bones)
-    expect(b.head).toEqual(a.head)
-    expect(b.stroke).toBe(a.stroke)
+    /*
+     * Сравниваются ДВА РАЗНЫХ пути рисования — превью и маска выреза, — а не
+     * `placeFigure` сам с собой: прошлая версия этого теста вызывала его
+     * дважды и доказывала лишь его детерминированность. Выпотроши `drawWall`
+     * до рисованной от руки палки — тот тест остался бы зелёным, и главный
+     * инвариант слоя рендера не был бы проверен вовсе.
+     *
+     * Две копии геометрии разъехались бы, и ребёнок не попадал бы в вырез,
+     * который видит.
+     */
+    /*
+     * Берётся НАСТОЯЩИЙ `drawWall`, а не копия его пути в тесте: копия
+     * воспроизвела бы ту же слабость, что и прошлая версия. Прямоугольник
+     * выбран так, чтобы пути совпадали покоординатно: при `wallZ = 1` стена
+     * занимает весь буфер, и превью в том же прямоугольнике обязано дать
+     * ровно тот же путь.
+     */
+    const box = wallBox(1)
+
+    const prev = tape()
+    drawPreview(prev.ctx, SPEC, box)
+
+    const mask = tape()
+    drawWall(tape().ctx, { canvas: {} as HTMLCanvasElement, ctx: mask.ctx }, SPEC, 1)
+
+    const shape = (e: Entry[]): unknown[] =>
+      e.filter((x): x is Extract<Entry, { kind: 'call' }> => x.kind === 'call')
+        .filter((x) => x.m === 'moveTo' || x.m === 'lineTo' || x.m === 'arc')
+        .map((x) => [x.m, ...x.a.map((v) => (typeof v === 'number' ? Math.round(v * 1000) / 1000 : v))])
+
+    expect(shape(mask.entries)).toEqual(shape(prev.entries))
+    expect(shape(prev.entries).length).toBeGreaterThan(0)
   })
 
   test('фигура целиком внутри отведённого прямоугольника', () => {
@@ -354,11 +403,19 @@ function wallRectOf(e: Entry[], wallZ: number): { a: unknown[]; fill: unknown } 
 }
 
 describe('приговор заливает саму стену', () => {
+  /*
+   * Прямоугольник стены ищется на СЛОЕ, а не в кадре: стена с вырезом
+   * собирается там и переносится в кадр одним `drawImage`. Искать её в кадре
+   * значило бы искать прямоугольник, которого там и нет.
+   */
   const fillOf = (kind: 'hit' | 'miss' | 'skip'): unknown => {
-    const { ctx, entries } = tape()
-    const { el } = fakeCanvas(ctx)
-    createRenderer(el).render(scene({ phase: 'verdict', verdict: kind }))
-    const rect = wallRectOf(entries, 1)
+    const main = tape()
+    const { el } = fakeCanvas(main.ctx)
+    const lay = fakeLayer()
+    createRenderer(el, { makeLayer: () => lay.layer }).render(
+      scene({ phase: 'verdict', verdict: kind }),
+    )
+    const rect = wallRectOf(lay.entries, 1)
     expect(rect).not.toBeNull()
     return rect!.fill
   }
@@ -381,10 +438,11 @@ describe('приговор заливает саму стену', () => {
   })
 
   test('без приговора стена своего цвета, а не цвета исхода', () => {
-    const { ctx, entries } = tape()
-    const { el } = fakeCanvas(ctx)
-    createRenderer(el).render(scene({ phase: 'wall' }))
-    const rect = wallRectOf(entries, 1)
+    const main = tape()
+    const { el } = fakeCanvas(main.ctx)
+    const lay = fakeLayer()
+    createRenderer(el, { makeLayer: () => lay.layer }).render(scene({ phase: 'wall' }))
+    const rect = wallRectOf(lay.entries, 1)
     expect(rect).not.toBeNull()
     expect(rect!.fill).not.toEqual(fillOf('hit'))
     expect(rect!.fill).not.toEqual(fillOf('miss'))
@@ -396,7 +454,7 @@ describe('HUD', () => {
     // За её пределами очки и остаток времени на телевизоре окажутся в полосе.
     const { ctx, entries } = tape()
     const { el } = fakeCanvas(ctx)
-    createRenderer(el).render(scene({ score: 12, leftMs: 45000 }))
+    renderer(el).render(scene({ score: 12, leftMs: 45000 }))
     const safe = safeArea()
     const texts = entries.filter((e) => e.kind === 'call' && e.m === 'fillText')
     expect(texts.length).toBeGreaterThan(0)
@@ -423,7 +481,7 @@ describe('HUD', () => {
   test('очки и остаток времени ПОКАЗАНЫ, а не только посчитаны', () => {
     const { ctx, entries } = tape()
     const { el } = fakeCanvas(ctx)
-    createRenderer(el).render(scene({ score: 12, leftMs: 45000 }))
+    renderer(el).render(scene({ score: 12, leftMs: 45000 }))
     const shown = entries
       .filter((e): e is Extract<Entry, { kind: 'call' }> => e.kind === 'call' && e.m === 'fillText')
       .map((e) => String(e.a[0]))
@@ -432,10 +490,33 @@ describe('HUD', () => {
     expect(shown).toMatch(/45|0:45/)
   })
 
+  test('прибавка берётся из CONFIG.score, а не записана в HUD', () => {
+    /*
+     * Инвариант «один факт живёт в одном месте», и он уже был нарушен здесь:
+     * HUD печатал `+3` / `−2` строками, а очки начисляет `CONFIG.score`.
+     * Поменяй `CONFIG.score.hit` на 5 — ребёнку начислялось бы 5, а на экране
+     * стояло бы `+3`, и прогон оставался бы зелёным.
+     */
+    const shown = (verdict: 'hit' | 'miss' | 'skip'): string => {
+      const { ctx, entries } = tape()
+      const { el } = fakeCanvas(ctx)
+      renderer(el).render(scene({ phase: 'verdict', verdict }))
+      return entries
+        .filter((e): e is Extract<Entry, { kind: 'call' }> => e.kind === 'call' && e.m === 'fillText')
+        .map((e) => String(e.a[0]))
+        .join(' ')
+    }
+
+    expect(shown('hit')).toContain(String(CONFIG.score.hit))
+    expect(shown('miss')).toContain(String(Math.abs(CONFIG.score.miss)))
+    // Несудимый раунд прибавки не показывает вовсе: её и не было.
+    expect(shown('skip')).not.toContain(String(CONFIG.score.hit))
+  })
+
   test('вес шрифта 700: тонкое начертание зеркалирование съедает', () => {
     const { ctx, entries } = tape()
     const { el } = fakeCanvas(ctx)
-    createRenderer(el).render(scene())
+    renderer(el).render(scene())
     const fonts = entries.filter((e) => e.kind === 'set' && e.p === 'font')
     expect(fonts.length).toBeGreaterThan(0)
     for (const f of fonts) {
@@ -450,7 +531,7 @@ describe('пауза', () => {
     // Молча замерший экран не говорит ребёнку, что делать.
     const { ctx, entries } = tape()
     const { el } = fakeCanvas(ctx)
-    createRenderer(el).render(scene({ paused: { why: 'jump' } }))
+    renderer(el).render(scene({ paused: { why: 'jump' } }))
     const shown = entries
       .filter((e): e is Extract<Entry, { kind: 'call' }> => e.kind === 'call' && e.m === 'fillText')
       .map((e) => String(e.a[0]))
@@ -483,9 +564,129 @@ describe('стена приближается', () => {
   test('нарисованная стена и есть та, что считает wallBox', () => {
     // Иначе проверка выше проверяла бы арифметику, которой рендер не
     // пользуется.
-    const { ctx, entries } = tape()
-    const { el } = fakeCanvas(ctx)
-    createRenderer(el).render(scene({ wallZ: 0.3 }))
-    expect(wallRectOf(entries, 0.3)).not.toBeNull()
+    const main = tape()
+    const { el } = fakeCanvas(main.ctx)
+    const lay = fakeLayer()
+    createRenderer(el, { makeLayer: () => lay.layer }).render(scene({ wallZ: 0.3 }))
+    expect(wallRectOf(lay.entries, 0.3)).not.toBeNull()
+  })
+})
+
+describe('вырез не выжигается в главном буфере', () => {
+  /*
+   * Главный контекст просят БЕЗ альфы (`alpha: false`) — так дешевле, и так
+   * задумано. Но в буфере без альфы `destination-out` не делает прозрачности:
+   * альфа принудительно единица, и «стёртое» композитится ЧЁРНЫМ. Вырез в
+   * стене вышел бы чёрной дырой вместо коридора, по которому едет стена, —
+   * причём на телефоне, а не в тесте.
+   *
+   * Поэтому стена с вырезом собирается на ОТДЕЛЬНОМ слое с альфой и потом
+   * переносится в кадр целиком.
+   */
+  function renderWall(): { main: Entry[]; layer: Entry[] } {
+    const main = tape()
+    const { el } = fakeCanvas(main.ctx)
+    const lay = fakeLayer()
+    createRenderer(el, { makeLayer: () => lay.layer }).render(scene({ phase: 'wall' }))
+    return { main: main.entries, layer: lay.entries }
+  }
+
+  test('в главном контексте НЕТ destination-out', () => {
+    const { main } = renderWall()
+    const erasing = main.filter(
+      (e) => e.kind === 'set' && e.p === 'globalCompositeOperation' && e.v === 'destination-out',
+    )
+    expect(erasing).toEqual([])
+  })
+
+  test('стирание происходит на слое, и слой переносится в кадр', () => {
+    const { main, layer } = renderWall()
+    expect(
+      layer.some((e) => e.kind === 'set' && e.p === 'globalCompositeOperation' && e.v === 'destination-out'),
+    ).toBe(true)
+    expect(calls(main, 'drawImage').length).toBeGreaterThan(0)
+  })
+
+  test('слой просят С альфой: без неё стирать на нём так же нечем', () => {
+    const asked: unknown[] = []
+    const main = tape()
+    const { el } = fakeCanvas(main.ctx)
+    const lay = fakeLayer()
+    createRenderer(el, {
+      makeLayer: (w, h) => {
+        asked.push({ w, h })
+        return lay.layer
+      },
+    }).render(scene({ phase: 'wall' }))
+    expect(asked).toEqual([{ w: RENDER.width, h: RENDER.height }])
+  })
+
+  test('слой очищается перед сборкой: прошлый кадр не просвечивает', () => {
+    // Слой переиспользуется между кадрами — он создаётся один раз. Без очистки
+    // стена прошлого кадра осталась бы под нынешней, и вырез показывал бы её.
+    const { layer } = renderWall()
+    expect(calls(layer, 'clearRect').length).toBeGreaterThan(0)
+  })
+})
+
+describe('силуэт игрока ложится НА вырез', () => {
+  /*
+   * Силуэт — подсказка «куда доворачивать», и подсказка, показывающая не туда,
+   * хуже отсутствующей. Уже допущенный однажды дефект: точки скелета
+   * раскладывались прямо по прямоугольнику стены (`box.x + lm.x * box.w`),
+   * тогда как вырез в том же прямоугольнике строится `placeFigure` — в долях
+   * ТОРСА, по центру и с запасом `figureFill`. Совпасть эти две системы не
+   * могли ни при каком кадре, и `x` вдобавок не домножался на отношение сторон.
+   */
+  const silhouetteOf = (lm: Float32Array): Array<[number, number]> => {
+    const main = tape()
+    const { el } = fakeCanvas(main.ctx)
+    const lay = fakeLayer()
+    createRenderer(el, { makeLayer: () => lay.layer }).render(
+      scene({ phase: 'wall', wallZ: 1, silhouette: lm, aspect: 16 / 9 }),
+    )
+    // Точки силуэта — дуги в главном контексте (стена и её вырез уехали на слой).
+    return main.entries
+      .filter((e): e is Extract<Entry, { kind: 'call' }> => e.kind === 'call' && e.m === 'arc')
+      .map((e) => [e.a[0] as number, e.a[1] as number])
+  }
+
+  test('середина плеч силуэта попадает в середину плеч выреза', () => {
+    /*
+     * Сравниваются КОНКРЕТНЫЕ точки, а не габариты: габаритная проверка на
+     * полном экране проходит и при разъехавшихся системах координат — именно
+     * поэтому первая версия этого теста дефекта не поймала. Точки приходят в
+     * порядке номеров скелета, так что `dots[LM.leftShoulder]` и есть левое
+     * плечо.
+     */
+    const lm = stick({ ...SPEC.requires, orientation: SPEC.orientation, facing: 'right', aspect: 16 / 9 })
+    const dots = silhouetteOf(lm)
+    expect(dots.length).toBe(LANDMARK_COUNT)
+
+    const placed = placeFigure(figure(SPEC), wallBox(1))
+    // `bones[1]` — линия плеч фигуры (порядок костей — в `core/figure.ts`).
+    const [figA, figB] = placed.bones[1]
+    const dotA = dots[LM.leftShoulder]
+    const dotB = dots[LM.rightShoulder]
+
+    // Середина плеч — величина, не зависящая от того, какое плечо «левое»:
+    // соглашения о сторонах у скелета и у кинематики свои.
+    const figMid = { x: (figA.x + figB.x) / 2, y: (figA.y + figB.y) / 2 }
+    const dotMid = { x: (dotA[0] + dotB[0]) / 2, y: (dotA[1] + dotB[1]) / 2 }
+
+    // Допуск — четверть штриха: попасть надо В вырез, а не в его окрестность.
+    const tol = placed.stroke / 4
+    expect(Math.abs(dotMid.x - figMid.x)).toBeLessThan(tol)
+    expect(Math.abs(dotMid.y - figMid.y)).toBeLessThan(tol)
+
+    // И ширина плеч обязана совпасть: иначе силуэт «той же позы» шире выреза.
+    expect(Math.abs(Math.abs(dotA[0] - dotB[0]) - Math.abs(figA.x - figB.x))).toBeLessThan(tol)
+  })
+
+  test('без известного отношения сторон силуэт не рисуется вовсе', () => {
+    // Геометрия на неизвестном `aspect` отказывается считать, и силуэт обязан
+    // отказаться вместе с ней: иначе он показывает уверенную неправду.
+    const broken = new Float32Array(LANDMARK_COUNT * LANDMARK_STRIDE)
+    expect(silhouetteOf(broken).length).toBe(0)
   })
 })

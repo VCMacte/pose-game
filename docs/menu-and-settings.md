@@ -4,9 +4,8 @@
 словаря поз и доступа взрослого к служебным экранам.
 
 Родитель: [`../CLAUDE.md`](../CLAUDE.md).
-Код: `src/adapters/settings.ts`, `src/shell/app.ts`, `src/shell/screens/*.ts`.
-Код (запланирован, ещё не написан): `src/adapters/settings.ts`,
-`src/shell/screens/*`, `src/core/picker.ts`.
+Код: `src/adapters/settings.ts`, `src/shell/app.ts`, `src/shell/screens/*.ts`,
+`src/core/picker.ts`.
 Замысел: [`concept-and-plan.md`](concept-and-plan.md).
 
 ## Три экрана и кто их видит

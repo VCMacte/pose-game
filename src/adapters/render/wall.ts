@@ -7,7 +7,7 @@
 import { figure } from '../../core/figure'
 import type { PoseSpec } from '../../core/types'
 import { RENDER, paintFigure, placeFigure } from './figure'
-import type { Box } from './figure'
+import type { Box, Placed } from './figure'
 
 /** Цвета. Плоские и контрастные: зеркалирование съедает полутона. */
 export const PALETTE = Object.freeze({
@@ -83,38 +83,66 @@ export function wallBox(wallZ: number): Box {
   return { x: (RENDER.width - w) / 2, y: cy - h / 2, w, h }
 }
 
+/** Слой с альфой, на котором собирается стена с вырезом. */
+export type Layer = { canvas: HTMLCanvasElement; ctx: CanvasRenderingContext2D }
+
 /**
  * Стена с вырезом по фигуре позы.
  *
- * Вырез делается `destination-out` по ТОЙ ЖЕ фигуре, что рисует превью. Залить
- * вырез цветом фона было бы проще и неверно: стена приезжает поверх пола, и
- * «фон» под ней разный на каждом кадре.
+ * **Вырез собирается на ОТДЕЛЬНОМ слое, а не выжигается в кадре, и это не
+ * перестраховка.** Главный контекст просят без альфы (`alpha: false`) — так
+ * дешевле, и так задумано, — а в буфере без альфы `destination-out` не делает
+ * прозрачности вовсе: альфа принудительно единица, и «стёртое» композитится
+ * ЧЁРНЫМ. Вырез вышел бы чёрной дырой вместо коридора, по которому едет стена.
+ * Хуже того, стирание в кадре съело бы и уже нарисованный пол: отсечение по
+ * прямоугольнику стены удерживает `destination-out` лишь от того, чтобы грызть
+ * ВНЕ стены, а внутри него пол исчезает вместе со стеной.
+ *
+ * Это уже допущенный однажды дефект; отменяемое рассуждение гласило, что
+ * заливать вырез цветом фона «проще и неверно, потому что фон под стеной
+ * разный на каждом кадре». Верно в нём только то, что заливать фоном нельзя;
+ * неверен вывод, будто поэтому годится стирание в кадре.
+ *
+ * Слой создаётся ОДИН раз на рендер и переиспользуется: по кадру на забег их
+ * было бы сорок в секунду. Поэтому перед сборкой он очищается — иначе стена
+ * прошлого кадра осталась бы под нынешней и просвечивала бы в вырезе.
  */
 export function drawWall(
   ctx: CanvasRenderingContext2D,
+  layer: Layer,
   spec: PoseSpec,
   wallZ: number,
   verdict?: 'hit' | 'miss' | 'skip',
-): void {
+): Placed {
   const box = wallBox(wallZ)
+  const lx = layer.ctx
+  // Укладка считается ОДИН раз и отдаётся наружу: силуэт игрока обязан лечь
+  // тем же преобразованием, а не своим.
+  const placed = placeFigure(figure(spec), box)
 
-  ctx.save()
-  ctx.fillStyle = verdict ? PALETTE[verdict] : PALETTE.wall
-  ctx.fillRect(box.x, box.y, box.w, box.h)
+  lx.save()
+  // Очищается только прямоугольник стены: чистить весь буфер каждый кадр
+  // незачем, за его пределами слой и не рисуется.
+  lx.clearRect(box.x, box.y, box.w, box.h)
+  lx.fillStyle = verdict ? PALETTE[verdict] : PALETTE.wall
+  lx.fillRect(box.x, box.y, box.w, box.h)
 
-  /*
-   * Вырез — только внутри прямоугольника стены: без отсечения `destination-out`
-   * прогрыз бы и пол с дальней тьмой, и на экране получилась бы дыра в мире.
-   */
-  ctx.beginPath()
-  ctx.rect(box.x, box.y, box.w, box.h)
-  ctx.clip()
-  ctx.globalCompositeOperation = 'destination-out'
-  ctx.fillStyle = '#000'
-  ctx.strokeStyle = '#000'
-  paintFigure(ctx, placeFigure(figure(spec), box))
-  ctx.globalCompositeOperation = 'source-over'
-  ctx.restore()
+  // Отсечение по стене оставлено: оно удерживает штрих фигуры, выходящий за
+  // край прямоугольника, от стирания соседних областей слоя.
+  lx.beginPath()
+  lx.rect(box.x, box.y, box.w, box.h)
+  lx.clip()
+  lx.globalCompositeOperation = 'destination-out'
+  lx.fillStyle = '#000'
+  lx.strokeStyle = '#000'
+  paintFigure(lx, placed)
+  lx.globalCompositeOperation = 'source-over'
+  lx.restore()
+
+  // Готовая стена переносится в кадр поверх пола: сквозь вырез виден пол, а не
+  // чёрное.
+  ctx.drawImage(layer.canvas, box.x, box.y, box.w, box.h, box.x, box.y, box.w, box.h)
+  return placed
 }
 
 /** Превью позы: та же фигура, нарисованная штрихом, без стены. */

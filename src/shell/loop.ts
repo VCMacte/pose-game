@@ -17,7 +17,8 @@
 
 import type { Frame } from '../core/types'
 import { health } from '../adapters/log/events'
-import { write } from '../adapters/log/store'
+import { write as journalWrite } from '../adapters/log/store'
+import type { LogEvent } from '../adapters/log/store'
 
 /** Раз в сколько писать сводку здоровья в журнал. */
 const HEALTH_MS = 1000
@@ -32,6 +33,14 @@ export type LoopOpts = {
    * только ядро, и выдумывать их здесь было бы враньём в журнал.
    */
   step(t: number, frames: Frame[]): StepCounts | void
+  /**
+   * Куда писать сводку здоровья. По умолчанию — журнал приложения.
+   *
+   * Подменяется, чтобы частоту записи можно было ПРОВЕРИТЬ: в node журнал
+   * молчит (IndexedDB нет), и тест, не подменяющий запись, не отличает «раз в
+   * секунду» от «не пишем вовсе».
+   */
+  write?: (e: LogEvent) => void
 }
 
 export type Loop = {
@@ -56,6 +65,7 @@ export type Loop = {
 }
 
 export function makeLoop(opts: LoopOpts): Loop {
+  const write = opts.write ?? journalWrite
   let buf: Frame[] = []
   let draws = 0
   let valid = 0

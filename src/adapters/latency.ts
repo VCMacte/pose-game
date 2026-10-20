@@ -163,7 +163,12 @@ export async function measureLatency(opts: {
   shots?: number
   loopback: Loopback
 }): Promise<LatencyResult> {
-  const shots = Math.max(1, opts.shots ?? LATENCY.shots)
+  /*
+   * Минимум ДВА выстрела, а не один: медиана по одному выстрелу — не медиана, и
+   * `need` ниже всё равно требует двух. `Math.max(1, …)` пускал сюда `shots: 1`,
+   * и такой замер отказывал всегда, даже на идеальной петле.
+   */
+  const shots = Math.max(2, opts.shots ?? LATENCY.shots)
   const { loopback } = opts
   const chirp = makeChirp(loopback.sampleRate)
 
