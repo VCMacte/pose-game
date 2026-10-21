@@ -35,6 +35,13 @@ jobs:
           node-version: '22'
           cache: npm
 
+      # Образ runner'а приносит npm 10, а lock писан одиннадцатым, и десятый
+      # разрешает поддерево `vite-node` иначе: `npm ci` отказывается
+      # («Missing: esbuild@0.28.2 from lock file») при совершенно целом lock.
+      # Проверено воспроизведением локально под `npx npm@10.9.9 ci`.
+      # Требование записано в `engines` package.json — здесь оно исполняется.
+      - run: npm i -g npm@11
+
       - run: npm ci --maxsockets 4 --no-audit --no-fund
 
       # Тесты ПЕРЕД публикацией, а не после. Игру открывает ребёнок с
