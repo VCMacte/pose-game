@@ -2,10 +2,19 @@
 /**
  * Собирает игру и выкладывает её на GitHub Pages.
  *
- * Pages настроен отдавать ветку `gh-pages` целиком, а не собирать сам. Это
- * сделано сознательно: сборка в Actions требует у токена права `workflow`,
- * которого у здешнего токена нет, а публикация ветки обходится без него
- * вовсе. Цена — выкладывать надо этой командой, а не одним `git push`.
+ * Pages настроен отдавать ветку `gh-pages` целиком, а не собирать сам, и это
+ * по-прежнему так.
+ *
+ * А вот цена, названная здесь прежде, — «выкладывать надо этой командой, а не
+ * одним `git push`» — больше не платится: пуш в `master` публикует сам
+ * (`.github/workflows/deploy.yml`). Отменяет её то, что воркфлоу зовёт ЭТОТ
+ * ЖЕ скрипт, а не собирает заново: право `workflow` нужно, чтобы файл
+ * воркфлоу ЗАПУШИТЬ, а не чтобы Actions потом работали. Руками команда тоже
+ * осталась — ею выкладывают, не дожидаясь CI.
+ *
+ * Адрес для пуша берётся из `POSE_GAME_REMOTE`, если он задан: в Actions туда
+ * приходит тот же адрес с токеном запуска. Локально переменной нет, и адрес
+ * остаётся прежним.
  *
  * Собранное в ветке — НЕ история проекта, а слепок: ветка перезаписывается
  * целиком (`--force`), и копаться в ней незачем. История живёт в `master`.
@@ -21,7 +30,7 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(ROOT, 'dist')
-const REMOTE = 'https://github.com/VCMacte/pose-game.git'
+const REMOTE = process.env.POSE_GAME_REMOTE || 'https://github.com/VCMacte/pose-game.git'
 
 function run(cmd, args, cwd, label) {
   const r = spawnSync(cmd, args, { cwd, stdio: 'inherit' })

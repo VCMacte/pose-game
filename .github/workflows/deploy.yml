@@ -1,0 +1,50 @@
+# Публикация игры на GitHub Pages при пуше в master.
+#
+# Деплоит ТОТ ЖЕ `tools/deploy.mjs`, которым выкладывают руками: вторая копия
+# логики публикации разошлась бы с первой молча, а разойтись ей есть в чём —
+# двухпроходная сборка, `.nojekyll`, слепок вместо истории.
+#
+# Pages отдаёт ветку `gh-pages` как есть и сам ничего не собирает; настройки
+# репозитория этот воркфлоу не меняет. Разбор: docs/offline-and-build.md.
+name: Публикация на Pages
+
+on:
+  push:
+    branches: [master]
+  # Выложить тот же master можно и руками — например, когда Pages отдал
+  # старое и надо просто повторить.
+  workflow_dispatch:
+
+# Два пуша подряд не должны драться за `gh-pages` силовым пушем: второй ждёт
+# первого, а не отменяет его на середине.
+concurrency:
+  group: pages-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      # Единственное нужное право: перезаписать ветку слепком.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci --maxsockets 4 --no-audit --no-fund
+
+      # Тесты ПЕРЕД публикацией, а не после. Игру открывает ребёнок с
+      # телефона, и выложенная сломанная сборка живёт у него в офлайн-кэше
+      # до следующего удачного деплоя.
+      - run: npm test
+
+      - run: npm run deploy
+        env:
+          # Тот же адрес, что и в скрипте, но с токеном запуска: иначе push
+          # в ветку из Actions некому подписать. GitHub вычёркивает этот
+          # токен из логов сам.
+          POSE_GAME_REMOTE: https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git
