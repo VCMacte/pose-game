@@ -24,6 +24,8 @@ import type { LogEvent } from '../adapters/log/store'
 import { makeSettings, timingsFor, toggleBlocked } from '../adapters/settings'
 import type { Settings } from '../adapters/settings'
 import type { Calibration, Frame, PoseTag } from '../core/types'
+import { DEFAULT_FAKE_SCRIPT, fakeFlagValue, fakeScript } from '../fake/flag'
+import type { FakeScript } from '../fake/flag'
 import { makeLoop } from './loop'
 import { makePlay } from './play'
 import type { Play } from './play'
@@ -68,6 +70,11 @@ export type AppDeps = {
    * границей начального бандла, и меню открывается, не дожидаясь их.
    */
   startPose?: (opts: StartPoseOpts) => Promise<() => Promise<void>>
+  /**
+   * Строка запроса для разбора `?fake=`. По умолчанию — `location.search`;
+   * подменяется в тестах, где `location` принадлежит всему прогону сразу.
+   */
+  search?: string | null
 }
 
 /** Что оболочка требует от источника позы. Подмножество `PoseSourceOpts`. */
@@ -89,11 +96,29 @@ async function defaultStartPose(opts: StartPoseOpts): Promise<() => Promise<void
     import('../adapters/pose/source'),
     import('../adapters/camera'),
   ])
+
+  /*
+   * Синтетический игрок грузится ТОЛЬКО когда его просят, отдельным
+   * динамическим импортом: в обычном запуске с камерой этот модуль не
+   * разбирается вовсе. Прежде его не подключали никуда, и режим «фейк»,
+   * выбранный на служебном экране, честно отвечал «синтетический игрок не
+   * подключён» — то есть не работал ни разу.
+   */
+  const fakeFrames =
+    opts.source === 'fake'
+      ? await import('../fake/player').then(
+          ({ fakeSource }) =>
+            (script: string, hz: number) =>
+              fakeSource(script as FakeScript, hz, (m) => journalWrite(m)),
+        )
+      : undefined
+
   return startPoseSource({
     source: opts.source,
     onSample: (f, meta) => opts.onSample(f, meta),
     onStatus: (st) => opts.onStatus(st),
     openCamera: () => openCamera(),
+    ...(fakeFrames ? { fakeFrames } : {}),
     ...(opts.script !== undefined ? { script: opts.script } : {}),
   })
 }
@@ -161,7 +186,40 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   let calibration: Calibration | null = null
   /** Источники отношения сторон кадра. Пополняются источником позы. */
   const aspectSource: AspectSource = {}
+  /** Ступень, которая сошла, либо `null`. Переживает `ready`: см. `onStatus`. */
+  let fellPipeline: string | null = null
   const debug: Debug & { rawAlways?: boolean } = { source: 'камера', pipeline: 'авто' }
+
+  /*
+   * `?fake=<сценарий>` — вход в локальную проверку без камеры. Адрес сильнее
+   * служебного экрана: по ссылке проверку воспроизводит кто угодно, ничего не
+   * перещёлкивая, и той же ссылкой она попадает в отчёт о дефекте.
+   *
+   * Неизвестное имя сценария НЕ откатывается на умолчание молча — опечатка
+   * прошла бы незамеченной, и проверяли бы не то, что собирались.
+   */
+  /*
+   * `!== undefined`, а не `??`: `search: null` означает «строки запроса нет»,
+   * и `??` подменил бы это настоящей `location.search` — объявленный тип и
+   * поведение разошлись бы молча.
+   */
+  const askedFake = fakeFlagValue(
+    deps.search !== undefined
+      ? deps.search
+      : typeof location === 'undefined'
+        ? null
+        : location.search,
+  )
+  let fakeScriptName: FakeScript = DEFAULT_FAKE_SCRIPT
+  let fakeRejected: string | null = null
+  if (askedFake !== null) {
+    const picked = fakeScript(askedFake)
+    if (picked === null) fakeRejected = askedFake
+    else {
+      debug.source = 'фейк'
+      fakeScriptName = picked
+    }
+  }
 
   /** Гасит такт экрана. Иначе два забега подряд дают два живых цикла rAF. */
   const stopFrames = (): void => {
@@ -217,7 +275,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
        * Нет Canvas2D — сказать вслух и остаться на экране: молча не рисующая
        * игра на штативе неотличима от мёртвой камеры.
        */
-      screenRun.say('Рисовать нечем: холст недоступен')
+      screenRun.alarm('Рисовать нечем: холст недоступен')
     }
 
     /*
@@ -249,15 +307,53 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     const startPose = deps.startPose ?? defaultStartPose
     void startPose({
       source: debug.source === 'фейк' ? 'fake' : 'camera',
+      ...(debug.source === 'фейк' ? { script: fakeScriptName } : {}),
       onSample: (f, meta) => {
         // Размер кадра — самый достоверный источник отношения сторон: именно
         // по этому кадру и судили.
-        if (meta.w && meta.h) aspectSource.frame = { w: meta.w, h: meta.h }
+        if (meta.w && meta.h) {
+          aspectSource.frame = { w: meta.w, h: meta.h }
+          /*
+           * Экран забега горизонтальный, а камера способна отдать вертикальный
+           * кадр: в первом живом прогоне она дала 360×640. Геометрия на таком
+           * кадре считается — `x` честно домножается на отношение сторон, — и
+           * калибровка проходит, так что расхождение нигде не всплывает: в
+           * журнале остаётся `aspect: 0.5625`, и прочесть по нему «телефон
+           * держали вертикально» можно, только зная, что так бывает.
+           */
+          if (meta.h > meta.w) screenRun.alarm('Кадр камеры вертикальный — поверни телефон')
+        }
         theLoop.sample(f)
       },
       onStatus: (st) => {
-        if (st.kind === 'exhausted') screenRun.say('Камеры нет: позы не будет')
-        if (st.kind === 'camera-lost') screenRun.say('Камера пропала')
+        if (st.kind === 'exhausted') screenRun.alarm('Камеры нет: позы не будет')
+        if (st.kind === 'camera-lost') screenRun.alarm('Камера пропала')
+        /*
+         * Просевшая ступень лестницы конвейеров раньше не говорила ничего:
+         * «не завёлся GPU», «нет MediaStreamTrackProcessor», «воркер умер» —
+         * всё это выглядело на экране как «ищу камеру». Ступень ниже обычно
+         * медленнее, и знать об этом взрослому полезнее, чем не знать.
+         */
+        if (st.kind === 'down') {
+          const d = st as unknown as { pipeline?: string }
+          fellPipeline = d.pipeline ?? 'верхняя'
+          screenRun.alarm(`Распознавание просело: ступень ${fellPipeline} сошла`)
+        }
+        if (st.kind === 'ready') {
+          const r = st as unknown as { pipeline?: string }
+          /*
+           * Кадры пошли — жалоба на камеру больше не про нынешнее положение
+           * дел. Но просадка конвейера `ready`-ем НЕ снимается: ступень ниже
+           * поднимается через секунду-другую, и сообщение, написанное на
+           * `down`, взрослый не успевал прочесть ни разу. Оно сменяется тем,
+           * что есть на самом деле: на чём игра в итоге работает.
+           */
+          screenRun.alarm(
+            fellPipeline === null
+              ? null
+              : `Распознавание просело: работает ${r.pipeline ?? 'запасная ступень'}`,
+          )
+        }
         if (st.kind === 'beat') {
           const b = st as unknown as { busyFrac: number; dropped: number; p50: number; p95: number }
           theLoop.noteBeat({ p50: b.p50, p95: b.p95, dropped: b.dropped })
@@ -270,7 +366,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
         // камера осталась бы занятой при погашенном экране.
         if (stopped || screen !== 'run') void stop()
       },
-      () => screenRun.say('Источник позы не запустился'),
+      () => screenRun.alarm('Источник позы не запустился'),
     )
 
     const theLoop = makeLoop({
@@ -308,7 +404,10 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
    */
   function menuInfo(): MenuInfo {
     const marks: string[] = []
-    if (debug.source === 'фейк') marks.push('источник: СИНТЕТИКА, камера не работает')
+    if (debug.source === 'фейк') {
+      marks.push(`источник: СИНТЕТИКА (${fakeScriptName}), камера не работает`)
+    }
+    if (fakeRejected !== null) marks.push(`?fake=${fakeRejected} — нет такого сценария`)
     if (debug.pipeline !== 'авто') marks.push(`конвейер: ${debug.pipeline}`)
     if (debug.rawAlways === true) marks.push('сплошная запись скелета')
 
@@ -333,6 +432,15 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
    */
   function refreshPause(): void {
     if (!rs || !play) return
+    /*
+     * Законченный забег выпускает с экрана САМ. Прежде выход был только через
+     * меню ручной паузы, а на законченном забеге пауза не встаёт: экран
+     * запирался насовсем — кнопка паузы видна и мертва, возвращаться некуда.
+     */
+    if (stage === 'finished') {
+      rs.finishMenu(true)
+      return
+    }
     const manual = play.manual()
     rs.pauseMenu(manual, play.state()?.canResume ?? false)
   }

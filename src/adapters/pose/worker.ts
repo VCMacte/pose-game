@@ -27,6 +27,7 @@ import { POSE, landmarkerOptions, looksLikeCpu, makeClock, packLandmarks, warmup
 import type { Delegate, Landmarker } from './pack'
 import { ERRORS_BEFORE_NEXT, makeErrorRun } from './pipelines'
 import type { PipelineMode } from './pipelines'
+import { mainClockOffset, makeTrackClock } from './track-clock'
 
 // ───────────────────────── сообщения ─────────────────────────
 
@@ -141,6 +142,8 @@ let landmarker: Landmarker | null = null
 let clock: ((ms: number) => number) | null = null
 let hz: number = POSE.hz
 let timeOffset = 0
+/** Часы дорожки, приведённые к часам главного потока. См. `track-clock.ts`. */
+const trackClock = makeTrackClock()
 let seq = 0
 
 /** Ровно один кадр в полёте: больше одного здесь не лежит никогда. */
@@ -213,7 +216,19 @@ function kick(): void {
    */
   const w = frame.displayWidth ?? frame.width ?? null
   const h = frame.displayHeight ?? frame.height ?? null
-  const tCap = typeof frame.timestamp === 'number' ? frame.timestamp / 1000 : now()
+  /*
+   * Момент съёмки обязан лежать на часах ГЛАВНОГО ПОТОКА: по нему ядро
+   * двигает раунды, а тик к нему приходит из `requestAnimationFrame`. Своя
+   * шкала дорожки, пущенная сюда без поправки, прокрутила в первом живом
+   * прогоне весь забег внутри одного тика — 60 секунд за 142 мс, девять
+   * приговоров с пустым буфером (docs/camera-and-pose.md).
+   *
+   * Поправка снимается один раз на дорожку, а не берётся `now()` на каждом
+   * кадре: `now()` — это момент, когда до кадра дошли руки, и очередь из
+   * двух кадров получила бы одинаковые отметки.
+   */
+  const tTrack = typeof frame.timestamp === 'number' ? frame.timestamp / 1000 : null
+  const tCap = trackClock.at(tTrack, now())
 
   const t0 = performance.now()
   let lm: Float32Array | null = null
@@ -293,6 +308,9 @@ function stopEverything(): void {
     // закрыть не вышло — воркер всё равно сейчас терминируют
   }
   landmarker = null
+  // Следующая дорожка принесёт своё начало отсчёта: прежняя поправка к нему
+  // отношения не имеет.
+  trackClock.reset()
 }
 
 async function init(msg: InitMsg): Promise<void> {
@@ -302,8 +320,12 @@ async function init(msg: InitMsg): Promise<void> {
    * У воркера своё начало отсчёта — момент его создания. Без поправки каждая
    * межпоточная метка смещена на задержку запуска воркера, и это смещение
    * выглядит в точности как задержка инференса.
+   *
+   * Знак выведен и проверен тестом в `track-clock.ts`: он ПОЛОЖИТЕЛЬНЫЙ.
+   * Обратный знак отставал от главных часов на две задержки запуска — по
+   * журналу первого живого прогона это 43 секунды.
    */
-  timeOffset = (msg.mainTimeOrigin ?? performance.timeOrigin) - performance.timeOrigin
+  timeOffset = mainClockOffset(msg.mainTimeOrigin ?? performance.timeOrigin, performance.timeOrigin)
 
   importScripts(msg.bundleUrl) // кладёт глобаль Vision
   const vision = scope.Vision

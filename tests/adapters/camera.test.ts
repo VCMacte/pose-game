@@ -49,15 +49,38 @@ describe('лестница ограничений', () => {
     // Сверху — то, что целевой телефон отдаёт дешевле всего; снизу `true`,
     // то есть «любая камера, какая есть»: отказаться от кадра совсем хуже,
     // чем взять кадр не того размера.
-    expect(CONSTRAINTS.length).toBe(4)
+    expect(CONSTRAINTS.length).toBe(5)
     expect(CONSTRAINTS[0]).toMatchObject({ width: { ideal: 640 }, height: { ideal: 360 } })
     expect(CONSTRAINTS[1]).toMatchObject({ width: { ideal: 480 }, height: { ideal: 270 } })
-    expect(CONSTRAINTS[2]).toEqual({})
-    expect(CONSTRAINTS[3]).toBe(true)
+    expect(CONSTRAINTS[2]).toEqual({ facingMode: { exact: 'user' } })
+    expect(CONSTRAINTS[3]).toEqual({ facingMode: { ideal: 'user' } })
+    expect(CONSTRAINTS[4]).toBe(true)
   })
 
   test('заморожена: подправить её на ходу нельзя', () => {
     expect(Object.isFrozen(CONSTRAINTS)).toBe(true)
+  })
+
+  /*
+   * Камера игры — ВСЕГДА фронтальная. Прежде `facingMode` не задавался вовсе,
+   * и выбор оставался за браузером: в первом живом прогоне он взял ту камеру,
+   * какую счёл нужной, и записал в журнал `facing: "user"` — угадал. Полагаться
+   * на угадывание нельзя, на другом телефоне оно даст заднюю камеру, а с ней
+   * ребёнок не видит себя на телевизоре.
+   */
+  test('каждая ступень, кроме последней, просит ФРОНТАЛЬНУЮ камеру', () => {
+    const steps = CONSTRAINTS.slice(0, -1) as ReadonlyArray<MediaTrackConstraints>
+    expect(steps.length).toBeGreaterThan(0)
+    for (const c of steps) expect(c.facingMode).toBeDefined()
+  })
+
+  test('верхние ступени требуют её ЖЁСТКО: браузеру не оставлено выбора', () => {
+    const top = CONSTRAINTS[0] as MediaTrackConstraints
+    expect(top.facingMode).toEqual({ exact: 'user' })
+  })
+
+  test('последняя ступень — всё равно любая камера: без кадра игры нет', () => {
+    expect(CONSTRAINTS[CONSTRAINTS.length - 1]).toBe(true)
   })
 })
 

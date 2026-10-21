@@ -34,6 +34,17 @@ import type { Scene } from '../adapters/render/canvas'
 import type { StepCounts } from './loop'
 import type { RunStage } from './screens/run'
 
+/**
+ * Что просят у ребёнка, пока идёт калибровка.
+ *
+ * Строка одна на два места — начальное значение и возврат после «Ищу камеру»,
+ * — потому что разошедшиеся копии дали бы две разные просьбы на одном экране.
+ */
+const CALIBRATION_HINT = 'Встань прямо и постой пять секунд'
+
+/** Пока отношения сторон нет: ни одного кадра ещё не пришло. */
+const SEARCHING_HINT = 'Ищу камеру'
+
 export type PlayDeps = {
   settings: Settings
   /** Уже снятая калибровка, если она есть и ещё годится. */
@@ -122,7 +133,7 @@ export function makePlay(deps: PlayDeps): Play {
   let calibrator: Calibrator | null = null
   let run: Run | null = null
   let stage: RunStage = 'calibration'
-  let hint = 'Встань прямо и постой пять секунд'
+  let hint = CALIBRATION_HINT
 
   /** Сколько исходов уже записано в журнал. */
   let logged = 0
@@ -356,9 +367,20 @@ export function makePlay(deps: PlayDeps): Play {
        * градусов, причём молча.
        */
       if (aspect === null) {
-        hint = 'Ищу камеру'
+        hint = SEARCHING_HINT
         return { scene: null, counts: { valid: 0, lost: 0 } }
       }
+
+      /*
+       * Кадр пришёл — строку поиска камеры надо СНЯТЬ, иначе она остаётся на
+       * экране навсегда: калибровка подсказку не переставляет. На телефоне так
+       * и вышло — камера работала, шла калибровка, а экран звал камеру.
+       *
+       * Снимается ровно она, а не «ставится общая подсказка»: безусловная
+       * установка стирала бы частную просьбу «Постой спокойно ещё немного»
+       * через кадр, ведь `step` проходит здесь ~50 раз в секунду.
+       */
+      if (hint === SEARCHING_HINT) hint = CALIBRATION_HINT
 
       if (!run) {
         if (usable(aspect)) startRun(t)
@@ -439,6 +461,24 @@ export function makePlay(deps: PlayDeps): Play {
 
     abort: (where) => {
       const st = run?.state
+      /*
+       * Законченный забег прерывать нечем: `run.abort` означает «прерван и НЕ
+       * дошёл до конца» (`adapters/log/events.ts`), и дописать его после
+       * `run.finish` значило бы соврать журналу — по нему настраивают пороги,
+       * и доигранный забег, помеченный прерванным, портит и статистику, и
+       * калибровку.
+       *
+       * Путь стал достижим вместе с меню финиша: прежде выхода с законченного
+       * экрана не было вовсе, и обработчик писался только под паузу.
+       *
+       * Забег, НЕ начавшийся вовсе (идёт калибровка), прерывание пишет
+       * по-прежнему: взрослый ушёл с экрана, и это событие забега, пусть и с
+       * нулями. Так было до меню финиша, и менять это ревью не просило.
+       */
+      if (st?.phase === 'finished') {
+        finished = true
+        return
+      }
       write(
         runAbort({
           where,

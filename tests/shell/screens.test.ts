@@ -576,3 +576,353 @@ function info(over: { version?: string; modelCached?: boolean; broken?: boolean 
     },
   }
 }
+
+/*
+ * Видимость отказов. Телефон стоит на штативе, консоли у него нет: сообщение
+ * на экране — единственный способ узнать, что сломалось. В первом живом
+ * прогоне не было видно НИ ОДНОГО отказа, потому что `say(hint)` зовётся
+ * каждый кадр rAF и затирал аварийную строку через ~16 мс.
+ */
+describe('аварийные сообщения переживают кадр экрана', () => {
+  /** Поднимает забег, отдавая наружу колбэк кадра и управление статусами. */
+  function runWith(over: Parameters<typeof app>[0] = {}) {
+    let frameCb: ((t: number) => void) | null = null
+    const a = app({
+      raf: (cb) => {
+        frameCb = cb
+        return 1
+      },
+      ...over,
+    })
+    a.go('run')
+    return { a, frame: (t: number) => frameCb!(t) }
+  }
+
+  test('отказ источника не стирается следующим кадром экрана', async () => {
+    const { frame } = runWith({ startPose: async () => Promise.reject(new Error('нет камеры')) })
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(text()).toMatch(/не запустился|Камеры нет/)
+
+    // Вот тот самый кадр, который всё и стирал.
+    frame(16)
+    frame(32)
+
+    expect(text()).toMatch(/не запустился|Камеры нет/)
+  })
+
+  test('«камеры нет» держится на экране, а не мигает', async () => {
+    let onStatus: ((s: { kind: string }) => void) | null = null
+    const { frame } = runWith({
+      startPose: async (opts) => {
+        onStatus = opts.onStatus as typeof onStatus
+        return async () => {}
+      },
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    onStatus!({ kind: 'exhausted' })
+    frame(16)
+
+    expect(text()).toMatch(/Камеры нет/)
+  })
+
+  test('просевшая ступень конвейера НАЗВАНА, а не проглочена', async () => {
+    // Статус `down` раньше не обрабатывался вовсе: лестница конвейеров могла
+    // просесть целиком, и на экране это ничем не отличалось от «ищу камеру».
+    let onStatus: ((s: { kind: string; pipeline?: string }) => void) | null = null
+    const { frame } = runWith({
+      startPose: async (opts) => {
+        onStatus = opts.onStatus as typeof onStatus
+        return async () => {}
+      },
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+    onStatus!({ kind: 'down', pipeline: 'stream/GPU' })
+    frame(16)
+
+    expect(text()).toMatch(/распознавани|конвейер|ступень/i)
+  })
+})
+
+describe('подсказка калибровки возвращается, когда камера нашлась', () => {
+  test('«Ищу камеру» не остаётся на экране после первого кадра', async () => {
+    /*
+     * `hint` ставится в «Ищу камеру», пока нет отношения сторон, и прежде
+     * НИКОГДА не возвращался обратно: ветка калибровки подсказку не трогала,
+     * и исходное «Встань прямо и постой пять секунд» было затёрто навсегда.
+     * На телефоне это выглядело как зависшая игра — камера уже работала, шла
+     * калибровка, а экран звал камеру.
+     */
+    let frameCb: ((t: number) => void) | null = null
+    let onSample: ((f: { t: number; lm: null }, m: { w: number; h: number }) => void) | null = null
+    const a = app({
+      raf: (cb) => {
+        frameCb = cb
+        return 1
+      },
+      startPose: async (opts) => {
+        onSample = opts.onSample as typeof onSample
+        return async () => {}
+      },
+    })
+    a.go('run')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    frameCb!(0)
+    expect(text()).toMatch(/Ищу камеру/)
+
+    // Кадр камеры пришёл: отношение сторон известно, идёт калибровка.
+    onSample!({ t: 1, lm: null }, { w: 640, h: 360 })
+    frameCb!(16)
+
+    expect(a.runStage()).toBe('calibration')
+    expect(text()).not.toMatch(/Ищу камеру/)
+    expect(text()).toMatch(/Встань прямо|постой/i)
+  })
+})
+
+describe('законченный забег выпускает с экрана', () => {
+  test('по окончании показано меню с выходом, и это НЕ меню паузы', async () => {
+    /*
+     * Прежде выход с экрана забега был только через меню ручной паузы
+     * (`onMenu`), а меню паузы на законченном забеге не показывается. Забег,
+     * доигранный до конца, запирал экран: кнопка паузы видна и мертва,
+     * вернуться некуда. На телефоне это и прочли как «кнопка не работает».
+     */
+    const { runScreen } = await import('../../src/shell/screens/run')
+    const rs = runScreen({ onPause: () => {}, onResume: () => {}, onMenu: () => {} })
+    root.appendChild(rs.root)
+
+    rs.finishMenu(true)
+
+    const toMenu = byTest('to-menu')
+    expect(toMenu).not.toBeNull()
+    expect(toMenu!.closest('[hidden]')).toBeNull()
+    // «Продолжить» на законченном забеге продолжать нечего.
+    expect((byTest('resume') as HTMLButtonElement).hidden).toBe(true)
+    expect(rs.root.textContent).not.toMatch(/Пауза/)
+  })
+
+  test('снимается так же, как ставится', async () => {
+    const { runScreen } = await import('../../src/shell/screens/run')
+    const rs = runScreen({ onPause: () => {}, onResume: () => {}, onMenu: () => {} })
+    root.appendChild(rs.root)
+
+    rs.finishMenu(true)
+    rs.finishMenu(false)
+
+    expect(byTest('pause-menu')!.hidden).toBe(true)
+  })
+})
+
+/*
+ * Локальная проверка без камеры: `?fake=<сценарий>`. Нужна она ровно потому,
+ * что первый живой прогон провалился на том, чего из node не видно, а гонять
+ * ребёнка перед штативом ради каждой правки нельзя.
+ */
+describe('?fake= — проверка игры без камеры', () => {
+  test('флаг включает синтетический источник', () => {
+    const a = app({ search: '?fake=hit' })
+    a.go('menu')
+
+    expect(text()).toMatch(/СИНТЕТИКА/)
+    expect(text()).toMatch(/hit/)
+  })
+
+  test('без флага источник остаётся камерой и плашки нет', () => {
+    const a = app({ search: '' })
+    a.go('menu')
+
+    expect(text()).not.toMatch(/СИНТЕТИКА/)
+  })
+
+  test('пустое значение берёт сценарий по умолчанию', () => {
+    const a = app({ search: '?fake=' })
+    a.go('menu')
+
+    expect(text()).toMatch(/СИНТЕТИКА/)
+  })
+
+  test('опечатка в сценарии НАЗВАНА, а не подменена умолчанием', () => {
+    // Молчаливый откат дал бы «проверил не то, что собирался».
+    const a = app({ search: '?fake=walk' })
+    a.go('menu')
+
+    expect(text()).toMatch(/нет такого сценария/)
+    expect(text()).not.toMatch(/СИНТЕТИКА/)
+  })
+
+  test('сценарий доезжает до источника позы, а не теряется в оболочке', async () => {
+    let asked: { source: string; script?: string } | null = null
+    const a = app({
+      search: '?fake=leave-frame',
+      startPose: async (opts) => {
+        asked = { source: opts.source, ...(opts.script ? { script: opts.script } : {}) }
+        return async () => {}
+      },
+    })
+    a.go('run')
+    await Promise.resolve()
+
+    expect(asked).toEqual({ source: 'fake', script: 'leave-frame' })
+  })
+})
+
+describe('вертикальный кадр камеры назван вслух', () => {
+  /*
+   * Экран забега горизонтальный, а камера в первом живом прогоне отдала кадр
+   * 360×640 — вертикальный. Геометрия на таком кадре считается (она честно
+   * домножает `x` на отношение сторон), калибровка проходит, и расхождение
+   * нигде не всплывает: в журнале остаётся `aspect: 0.5625`, и понять по нему,
+   * что телефон держали вертикально, можно только зная, что так бывает.
+   */
+  function runWithFrame(w: number, h: number) {
+    let onSample: ((f: { t: number; lm: null }, m: { w: number; h: number }) => void) | null = null
+    let frameCb: ((t: number) => void) | null = null
+    const a = app({
+      raf: (cb) => {
+        frameCb = cb
+        return 1
+      },
+      startPose: async (opts) => {
+        onSample = opts.onSample as typeof onSample
+        return async () => {}
+      },
+    })
+    a.go('run')
+    return {
+      feed: async () => {
+        await Promise.resolve()
+        await Promise.resolve()
+        onSample!({ t: 1, lm: null }, { w, h })
+        frameCb!(16)
+      },
+    }
+  }
+
+  test('кадр 360×640 — предупреждение повернуть телефон', async () => {
+    const { feed } = runWithFrame(360, 640)
+    await feed()
+
+    expect(text()).toMatch(/вертикальн|поверни/i)
+  })
+
+  test('кадр 640×360 — ничего лишнего не говорится', async () => {
+    const { feed } = runWithFrame(640, 360)
+    await feed()
+
+    expect(text()).not.toMatch(/вертикальн|поверни/i)
+  })
+})
+
+describe('просьба постоять спокойно не затирается общей подсказкой', () => {
+  test('«Постой спокойно ещё немного» держится, а не мигает один кадр', async () => {
+    /*
+     * Калибровка переспрашивает подсказку каждый кадр, и безусловная
+     * установка общей просьбы стирала бы частную через ~16 мс — тот же класс
+     * дефекта, ради которого в этом же изменении аварийную строку отделили
+     * от подсказки. Ребёнок, который ёрзает, видел бы общую инструкцию
+     * вместо «стой спокойно».
+     */
+    let onSample: ((f: { t: number; lm: Float32Array | null }, m: { w: number; h: number }) => void) | null = null
+    let frameCb: ((t: number) => void) | null = null
+    const a = app({
+      raf: (cb) => {
+        frameCb = cb
+        return 1
+      },
+      startPose: async (opts) => {
+        onSample = opts.onSample as typeof onSample
+        return async () => {}
+      },
+    })
+    a.go('run')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const { stick } = await import('../../src/fake/stick')
+    /*
+     * Ребёнок шевелится: каждый кадр сдвинут. Калибратор отвечает `steady`,
+     * и просьба постоять обязана остаться на экране.
+     */
+    for (let i = 0; i < 90; i++) {
+      // Разброс центра втрое выше порога `calibration.steadyCx` (0.03).
+      const x = i % 2 === 0 ? 0.45 : 0.55
+      onSample!({ t: i * 83, lm: stick({ aspect: 16 / 9, x }) }, { w: 640, h: 360 })
+      frameCb!(i * 83)
+    }
+
+    expect(a.runStage()).toBe('calibration')
+    expect(text()).toMatch(/спокойно/i)
+  })
+})
+
+describe('просадка конвейера переживает поднявшуюся ступень', () => {
+  function runWithStatus() {
+    let onStatus: ((s: { kind: string; pipeline?: string }) => void) | null = null
+    let frameCb: ((t: number) => void) | null = null
+    const a = app({
+      raf: (cb) => {
+        frameCb = cb
+        return 1
+      },
+      startPose: async (opts) => {
+        onStatus = opts.onStatus as typeof onStatus
+        return async () => {}
+      },
+    })
+    a.go('run')
+    return {
+      status: async (s: { kind: string; pipeline?: string }) => {
+        await Promise.resolve()
+        await Promise.resolve()
+        onStatus!(s)
+        frameCb!(16)
+      },
+    }
+  }
+
+  test('сообщение о просадке не гаснет от ready, а называет рабочую ступень', async () => {
+    /*
+     * Ступень ниже поднимается через секунду-другую, и `ready` сразу за
+     * `down` стирал сообщение прежде, чем взрослый успевал его прочесть.
+     */
+    const { status } = runWithStatus()
+    await status({ kind: 'down', pipeline: 'stream/GPU' })
+    await status({ kind: 'ready', pipeline: 'bitmap/GPU' })
+
+    expect(text()).toMatch(/просело/i)
+    expect(text()).toMatch(/bitmap\/GPU/)
+  })
+
+  test('без просадки ready не оставляет никаких жалоб', async () => {
+    const { status } = runWithStatus()
+    await status({ kind: 'ready', pipeline: 'stream/GPU' })
+
+    expect(text()).not.toMatch(/просело/i)
+  })
+
+  test('ready снимает жалобу на камеру, если лестница не проседала', async () => {
+    const { status } = runWithStatus()
+    await status({ kind: 'camera-lost' })
+    expect(text()).toMatch(/Камера пропала/)
+
+    await status({ kind: 'ready', pipeline: 'stream/GPU' })
+
+    expect(text()).not.toMatch(/Камера пропала/)
+  })
+})
+
+describe('search: явный null означает «строки запроса нет»', () => {
+  test('null не подменяется настоящей location.search', () => {
+    const a = app({ search: null })
+    a.go('menu')
+
+    expect(text()).not.toMatch(/СИНТЕТИКА/)
+    expect(text()).not.toMatch(/нет такого сценария/)
+  })
+})

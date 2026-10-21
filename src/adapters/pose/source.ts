@@ -43,6 +43,8 @@ import {
 } from './pipelines'
 import type { Pipeline } from './pipelines'
 import type { FromWorker, InitMsg } from './worker'
+import { makeTrackClock } from './track-clock'
+import { FAKE_FRAME } from '../../fake/flag'
 
 /** Абсолютный адрес файла вендора: воркер не умеет разрешать относительные. */
 const at = (path: string): string =>
@@ -192,21 +194,38 @@ async function startFake(opts: PoseSourceOpts, hz: number): Promise<Stop> {
 
   let stopped = false
   let seq = 0
+  /*
+   * Синтетические кадры нумеруются от НУЛЯ, а тик экрана приходит из
+   * `requestAnimationFrame`, то есть из `performance.now()`. Без поправки
+   * кадры оказываются в далёком прошлом относительно тика и не попадают в
+   * окно судейства никогда: игра идёт, и ничего не засчитывается. Это та же
+   * ловушка часов, что увела первый живой прогон, только зеркальная — и
+   * выглядела бы она дефектом игры, а не стенда.
+   *
+   * Сдвигается НАЧАЛО отсчёта, а не темп: шаг между кадрами сохраняется.
+   */
+  const clock = makeTrackClock()
 
   const pump = async (): Promise<void> => {
     for await (const frame of frames(script, hz)) {
       if (stopped) return
-      const t = frame.t
-      opts.onSample(frame, {
-        seq: seq++,
-        tCap: t,
-        tDone: t,
-        inferMs: 0,
-        dropped: 0,
-        w: null,
-        h: null,
-        pipeline: 'fake',
-      })
+      const t = clock.at(frame.t, performance.now())
+      opts.onSample(
+        { ...frame, t },
+        {
+          seq: seq++,
+          tCap: t,
+          tDone: t,
+          inferMs: 0,
+          dropped: 0,
+          // Размер синтетика обязана называть так же, как камера: без него
+          // отношения сторон нет, геометрия не считает, и экран остаётся с
+          // «Ищу камеру» навсегда — то есть стенд выглядит мёртвой камерой.
+          w: FAKE_FRAME.w,
+          h: FAKE_FRAME.h,
+          pipeline: 'fake',
+        },
+      )
     }
   }
 

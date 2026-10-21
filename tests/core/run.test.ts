@@ -650,3 +650,56 @@ describe('ручная пауза', () => {
     expect(() => run.pauseManual(START + 500)).toThrow()
   })
 })
+
+/**
+ * Живой телефон подаёт кадры с ДРУГОЙ шкалы времени, чем тик: на воркерном
+ * конвейере `Frame.t` приходит из `VideoFrame.timestamp` — часов видеотрека, —
+ * а `tick(t)` идёт от `requestAnimationFrame`. В журнале первого живого прогона
+ * разрыв составил ~9.3e8 мс, и забег на 60 секунд схлопнулся за 142 мс: время
+ * кадра прокрутило все девять раундов внутри одного тика, каждый приговор вышел
+ * с нулём кадров, счёт — ноль.
+ *
+ * Чинится это в адаптере (`tCap` обязан лежать на часах главного потока), но
+ * ядро не вправе на адаптер полагаться: кадр не может быть датирован ПОЗЖЕ
+ * тика, который его принёс. Время раунда не обгоняет тик, чем бы ни была
+ * помечена пачка кадров.
+ */
+describe('кадр из будущего не прокручивает забег', () => {
+  /** Порядок разрыва тот же, что в журнале с телефона. */
+  const SKEW = 900_000
+
+  /** Тот же `drive`, но отметка кадра уехала на `SKEW` вперёд от отметки тика. */
+  function driveSkewed(run: Run, from: number, to: number, how: How): RunState {
+    let last = run.state
+    ticks(from, to).forEach((t, i) => {
+      const d = how(t, last.pose, i)
+      const frames: Frame[] = d === 'gap' ? [] : [{ t: t + SKEW, lm: d === null ? null : shot(d) }]
+      last = run.tick(t, frames)
+    })
+    return last
+  }
+
+  test('первый же тик не заканчивает забег', () => {
+    const run = makeRun(opts())
+    const s = run.tick(START, [{ t: START + SKEW, lm: shot({}) }])
+
+    expect(s.phase).toBe('running')
+    expect(s.outcomes.length).toBe(0)
+  })
+
+  test('забег со сдвинутыми часами кадра идёт так же, как с совпадающими', () => {
+    const skewed = driveSkewed(makeRun(opts()), START, START + 20_000, right)
+    const aligned = drive(makeRun(opts()), START, START + 20_000, right)
+
+    expect(skewed.phase).toBe(aligned.phase)
+    expect(skewed.outcomes.map((o) => o.kind)).toEqual(aligned.outcomes.map((o) => o.kind))
+    expect(skewed.score).toBe(aligned.score)
+  })
+
+  test('приговор выносится по кадрам, а не по пустому буферу', () => {
+    const s = driveSkewed(makeRun(opts()), START, START + 20_000, right)
+
+    expect(s.outcomes.length).toBeGreaterThan(0)
+    for (const o of s.outcomes) expect(o.verdict!.frames).toBeGreaterThan(0)
+  })
+})

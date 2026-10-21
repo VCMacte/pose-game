@@ -71,6 +71,14 @@ async function playRun(opts: {
   tier: 1 | 2 | 3
   /** Звук исходов, если его проверяют. */
   audio?: { cue(): void; hit(): void; miss(): void; neutral(): void }
+  /**
+   * Насколько часы КАДРА уехали вперёд от часов ТИКА. На живом телефоне это
+   * не выдумка: воркерный конвейер датирует кадр `VideoFrame.timestamp` —
+   * часами видеотрека, — а тик приходит из `requestAnimationFrame`. Прогон
+   * без сдвига подаёт `t === frame.t` тождественно и потому не видит целого
+   * класса отказов (docs/camera-and-pose.md).
+   */
+  frameSkew?: number
 }): Promise<{ state: RunState; log: Row[]; scenes: number }> {
   const marks: FakeMarker[] = []
   /*
@@ -176,7 +184,10 @@ async function playRun(opts: {
       }
     }
 
-    const got = play.step(frame.t, [frame])
+    // Тик идёт по своим часам, кадр — по своим: ровно так их видит оболочка
+    // на телефоне.
+    const skew = opts.frameSkew ?? 0
+    const got = play.step(frame.t, [skew === 0 ? frame : { ...frame, t: frame.t + skew }])
     if (got.scene) scenes++
   }
 
@@ -511,10 +522,70 @@ describe('ручная пауза в забеге', () => {
     expect(play.state()!.score).toBe(0)
   })
 
+test('выход из ЗАКОНЧЕННОГО забега не пишет run.abort поверх run.finish', () => {
+    /*
+     * `run.abort` означает «прерван и НЕ дошёл до конца»
+     * (`adapters/log/events.ts`). Дописать его после `run.finish` значит
+     * соврать журналу: по нему настраивают пороги, и доигранный забег,
+     * помеченный прерванным, портит и статистику, и калибровку.
+     *
+     * Путь стал достижим вместе с меню законченного забега: прежде выхода с
+     * того экрана не было вовсе, и обработчик писался только под паузу.
+     */
+    const { play, log, run } = interactive({ tier: 1 })
+    run(0, DURATION_S * 1000 + 15_000)
+    expect(play.state()?.phase).toBe('finished')
+    expect(log.some((e) => e.type === 'run.finish')).toBe(true)
+
+    play.abort('menu')
+
+    expect(log.some((e) => e.type === 'run.abort')).toBe(false)
+  })
+
   test('пауза даёт всплеск строк скелета: это интересный для разбора момент', () => {
     const { play, log, run } = interactive({ tier: 1 })
     run(0, 1500)
     play.pauseManual(1500)
     expect(log.some((e) => e.type === 'raw' && e.why === 'pause')).toBe(true)
+  })
+})
+
+/**
+ * Разрыв часов кадра и часов тика — тот самый класс отказов, которого в этом
+ * файле не было: и здесь, и в юнитах ядра время кадра совпадало с временем
+ * тика ТОЖДЕСТВЕННО, потому что синтетический источник ставит `tCap: t`
+ * (`adapters/pose/source.ts`). На телефоне совпадения нет: воркерный конвейер
+ * датирует кадр часами видеотрека. В первом живом прогоне разрыв составил
+ * ~9.3e8 мс, и забег на 60 секунд кончился за 142 мс — девять несудимых
+ * раундов с пустым буфером и счёт ноль, при исправных камере и трекере.
+ *
+ * Прогон со сдвигом обязан быть НЕОТЛИЧИМ от прогона без него.
+ */
+describe('часы кадра разошлись с часами тика', () => {
+  /** Порядок разрыва тот же, что в журнале с телефона. */
+  const SKEW = 900_000
+
+  test('забег со сдвинутыми часами кадра идёт так же, как с совпадающими', async () => {
+    const skewed = await playRun({ tier: 3, frameSkew: SKEW })
+    const aligned = await playRun({ tier: 3 })
+
+    expect(skewed.state.phase).toBe(aligned.state.phase)
+    expect(skewed.state.outcomes.map((o) => o.kind)).toEqual(
+      aligned.state.outcomes.map((o) => o.kind),
+    )
+    expect(skewed.state.score).toBe(aligned.state.score)
+  })
+
+  test('забег не схлопывается: раунды судятся по кадрам, а не по пустоте', async () => {
+    const { state } = await playRun({ tier: 3, frameSkew: SKEW })
+
+    expect(state.outcomes.length).toBeGreaterThan(0)
+    for (const o of state.outcomes) expect(o.verdict!.frames).toBeGreaterThan(0)
+  })
+
+  test('сцена рисуется: сдвиг не оставляет экран пустым', async () => {
+    const { scenes } = await playRun({ tier: 3, frameSkew: SKEW })
+
+    expect(scenes).toBeGreaterThan(0)
   })
 })

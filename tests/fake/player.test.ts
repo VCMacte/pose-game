@@ -5,7 +5,7 @@ import { judgeWindow, type CheckedFrame } from '../../src/core/judge'
 import { POSES } from '../../src/core/poses'
 import { newPresenceState, presence, type PresenceState } from '../../src/core/presence'
 import type { Calibration, Frame, Orientation } from '../../src/core/types'
-import { fakeSource, SCRIPTS, type FakeScript, type FakeSource } from '../../src/fake/player'
+import { fakeSource, fakeFlagValue, fakeScript, SCRIPTS, type FakeScript, type FakeSource } from '../../src/fake/player'
 import { stick } from '../../src/fake/stick'
 
 /**
@@ -234,5 +234,42 @@ describe('отказы формы', () => {
     expect([...SCRIPTS].sort()).toEqual(
       ['hit', 'leave-frame', 'miss-one-axis', 'still', 'subject-swap', 'turn-profile'].sort(),
     )
+  })
+})
+
+/*
+ * Флаг `?fake=` — вход в локальную проверку без камеры: игра гоняется на
+ * десктопе синтетическим игроком. Модель взята из `?pipeline=`: значение
+ * разбирается ЧИСТОЙ функцией, чтобы его можно было проверить из node, а
+ * `location` трогала одна строка в оболочке.
+ */
+describe('флаг ?fake=', () => {
+  test('значение достаётся из строки запроса', () => {
+    expect(fakeFlagValue('?fake=hit')).toBe('hit')
+    expect(fakeFlagValue('fake=leave-frame&pipeline=main')).toBe('leave-frame')
+  })
+
+  test('флага нет — null, и это не то же самое, что пустое значение', () => {
+    expect(fakeFlagValue('?pipeline=main')).toBe(null)
+    expect(fakeFlagValue('')).toBe(null)
+    expect(fakeFlagValue(null)).toBe(null)
+    expect(fakeFlagValue('?fake=')).toBe('')
+  })
+
+  test('пустое значение означает сценарий по умолчанию', () => {
+    // `?fake=` набирают, когда хотят «просто проверь игру», а не конкретный
+    // сценарий: по умолчанию игрок повторяет позы верно.
+    expect(fakeScript('')).toBe('hit')
+  })
+
+  test('каждый известный сценарий узнаётся по имени', () => {
+    for (const s of SCRIPTS) expect(fakeScript(s)).toBe(s)
+  })
+
+  test('неизвестный сценарий — null, а не молчаливая подмена', () => {
+    // Молчаливый откат на умолчание дал бы «проверил не то, что собирался»:
+    // опечатка в имени сценария прошла бы незамеченной.
+    expect(fakeScript('walk')).toBe(null)
+    expect(fakeScript('ХИТ')).toBe(null)
   })
 })

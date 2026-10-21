@@ -1,5 +1,7 @@
 import { POSES } from '../core/poses'
 import type { Frame } from '../core/types'
+import { FAKE_FRAME, SCRIPTS } from './flag'
+import type { FakeScript } from './flag'
 import { stick, type StickDesc } from './stick'
 
 /**
@@ -31,7 +33,8 @@ import { stick, type StickDesc } from './stick'
  * вызывающий (обычно — `journal.write`, задача 19).
  */
 
-const ASPECT = 16 / 9
+/** Отношение сторон синтетического кадра. Размер объявлен в `flag.ts`. */
+const ASPECT = FAKE_FRAME.w / FAKE_FRAME.h
 
 /** 13 названий, 18 вырезов — «Звезда» годится: фронтальная, симметричная, ступень 1. */
 const STAR = POSES.find((p) => p.id === 'star')
@@ -53,16 +56,8 @@ const NEUTRAL_DESC: Partial<StickDesc> = {}
 /** После какого кадра сценарии со сменой состояния переключаются. Даёт время presence накопить доверенный торс. */
 const SWITCH_AT = 5
 
-export const SCRIPTS = [
-  'still',
-  'hit',
-  'miss-one-axis',
-  'leave-frame',
-  'turn-profile',
-  'subject-swap',
-] as const
-
-export type FakeScript = (typeof SCRIPTS)[number]
+export { DEFAULT_FAKE_SCRIPT, SCRIPTS, fakeFlagValue, fakeScript } from './flag'
+export type { FakeScript } from './flag'
 
 /** Готовая запись журнала, которой источник отличает себя от настоящей камеры. */
 export type FakeMarker = { type: 'fake.source'; data: { script: FakeScript; hz: number } }
@@ -167,3 +162,4 @@ export function fakeSource(script: FakeScript, hz: number, onMark: OnMark, pace:
 
   return { [Symbol.asyncIterator]: gen }
 }
+
