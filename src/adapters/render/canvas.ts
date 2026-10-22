@@ -20,6 +20,8 @@ import { RENDER, safeArea } from './figure'
 import type { Placed } from './figure'
 import { geometry } from '../../core/geometry'
 import { drawHud } from './hud'
+import { drawCalibration } from './calibrate'
+import type { CalibScene } from './calibrate'
 import { PALETTE, drawFloor, drawPreview, drawWall } from './wall'
 import type { Layer } from './wall'
 
@@ -44,6 +46,16 @@ export type Scene = {
 
 export type Renderer = {
   render(s: Scene): void
+  /**
+   * Экран КАЛИБРОВКИ: область, куда встать, поза и живой силуэт.
+   *
+   * Необязателен по типу намеренно: рендер подменяется в десятке тестов, и
+   * обязательный метод заставил бы каждый из них рисовать то, что они не
+   * проверяют. Настоящий рендер его реализует, а оболочка зовёт через `?.` —
+   * отсутствие даёт прежнее поведение (пустой экран), и это та же цена, что
+   * была до появления экрана.
+   */
+  calibration?(c: CalibScene): void
 }
 
 export type RendererDeps = {
@@ -87,6 +99,8 @@ export function createRenderer(canvas: HTMLCanvasElement, deps: RendererDeps = {
   const layer = (deps.makeLayer ?? defaultLayer)(RENDER.width, RENDER.height)
 
   return {
+    calibration: (c: CalibScene): void => drawCalibration(ctx, c),
+
     render: (s: Scene): void => {
       drawFloor(ctx, s.wallZ)
 

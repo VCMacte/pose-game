@@ -80,6 +80,26 @@ export function printReport(path: string | undefined): void {
   process.stdout.write(`\nпаузы по причинам:${pauses.length ? '' : ' нет'}\n`)
   for (const [why, n] of pauses) process.stdout.write(`  ${why.padEnd(14)} ${n}\n`)
 
+  /*
+   * Запертая пауза — отдельной строкой от обычных: обычная значит «ждём
+   * ребёнка», запертая — «забег кончился ничем, и взрослому пришлось выйти».
+   * Смешать их значило бы спрятать второе в первом.
+   */
+  const stuck = Object.entries(r.stuckPauses).sort((a, b) => b[1] - a[1])
+  if (stuck.length > 0) {
+    process.stdout.write('\nзабег ЗАПИРАЛСЯ на паузе:\n')
+    for (const [why, n] of stuck) process.stdout.write(`  ${why.padEnd(14)} ${n}\n`)
+  }
+
+  const calib = Object.entries(r.calibFailed).sort((a, b) => b[1] - a[1])
+  if (calib.length > 0) {
+    process.stdout.write('\nкалибровка не сдавалась:\n')
+    for (const [need, n] of calib) {
+      const words = need === 'steady' ? 'шевелился' : 'мало отсчётов'
+      process.stdout.write(`  ${need.padEnd(14)} ${n}  (${words})\n`)
+    }
+  }
+
   const axes = Object.entries(r.axisMisses).sort((a, b) => b[1] - a[1])
   process.stdout.write(`\nпромахи по осям:${axes.length ? '' : ' нет'}\n`)
   for (const [axis, n] of axes) process.stdout.write(`  ${axis.padEnd(14)} ${n}\n`)

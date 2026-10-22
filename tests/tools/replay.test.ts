@@ -545,6 +545,22 @@ describe('сводка по журналу', () => {
     expect(r.health.fps).toBe(39)
   })
 
+  test('запертая пауза и несдавшаяся калибровка ВИДНЫ в сводке', () => {
+    /*
+     * Найдено код-ревью: оба события падали в `default`, и разбор журнала
+     * молчал ровно о том, ради чего они заведены. Взрослый снова читал бы
+     * полмегабайта JSON глазами — тот самый путь, который сводка и отменяет.
+     */
+    const d = runWith(['hit'], [])
+    const log = d.sessions[0].log
+    log.push({ t: 700, type: 'pause.stuck', why: 'orientation', heldMs: 10_400 })
+    log.push({ t: 701, type: 'calib.need', need: 'more', frames: 420, withGeometry: 0, heldMs: 35_000 })
+    log.push({ t: 702, type: 'calib.need', need: 'steady', frames: 300, withGeometry: 280, heldMs: 7000 })
+    const r = report(d)
+    expect(r.stuckPauses).toEqual({ orientation: 1 })
+    expect(r.calibFailed).toEqual({ more: 1, steady: 1 })
+  })
+
   test('тревоги, уходы из видимости и ошибки ВИДНЫ в сводке', () => {
     /*
      * Всё это раньше уходило в `default` и не считалось нигде — тот же пробел,

@@ -129,6 +129,7 @@ const EVENT_CTOR_NAMES = exactEventCtorNames([
   'calibDone',
   'calibNeed',
   'calibStale',
+  'pauseStuck',
 ] as const)
 
 describe('конструкторы событий не заводят зарезервированные имена конверта', () => {
@@ -138,7 +139,7 @@ describe('конструкторы событий не заводят зарез
     // `never` — именно то, что старый рантайм-подсчёт по `typeof v ===
     // 'function'` поймать не мог, потому что считал чужие экспорты, а не
     // отобранное из них типом подмножество.
-    expect(EVENT_CTOR_NAMES.length).toBe(29)
+    expect(EVENT_CTOR_NAMES.length).toBe(30)
 
     const names = Object.entries(ev)
       .filter(([, v]) => typeof v === 'function')

@@ -41,6 +41,16 @@ export type Report = {
   health: { fps: number; inferMedian: number; inferWorst: number; drops: number; windows: number }
   /** Текст тревоги → сколько раз показана. */
   alarms: Record<string, number>
+  /**
+   * Причина ЗАПЕРТОЙ автопаузы → сколько раз забег запирался.
+   *
+   * Отдельно от `pauses`: та говорит «игра встала», а эта — «встала и сама не
+   * встала бы», то есть забег кончился ничем. В живом забеге 22.10.2026 это
+   * случилось по `orientation` и стоило всего захода.
+   */
+  stuckPauses: Record<string, number>
+  /** Чего не хватило калибровке → сколько раз она об этом сказала. */
+  calibFailed: Record<string, number>
   /** Сколько раз страница уходила из видимости. */
   hidden: number
   /** Ошибок за все сессии: `error`, `error.promise`, `pose.fail`. */
@@ -109,6 +119,8 @@ export function report(dump: unknown): Report {
     hardestPose: null,
     health: { fps: 0, inferMedian: 0, inferWorst: 0, drops: 0, windows: 0 },
     alarms: {},
+    stuckPauses: {},
+    calibFailed: {},
     hidden: 0,
     errors: 0,
     synthetic: false,
@@ -208,6 +220,14 @@ export function report(dump: unknown): Report {
 
         case 'pause':
           bump(out.pauses, e.why, occurrences(e))
+          break
+
+        case 'pause.stuck':
+          bump(out.stuckPauses, e.why, occurrences(e))
+          break
+
+        case 'calib.need':
+          bump(out.calibFailed, e.need, occurrences(e))
           break
 
         case 'alarm':

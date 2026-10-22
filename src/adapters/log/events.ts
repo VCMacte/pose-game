@@ -214,6 +214,21 @@ export const pause = (d: { why: PauseWhy }): Of<'pause', { why: PauseWhy }> => (
 })
 
 /**
+ * Автопауза провисела дольше `presence.stuckMs` — забег ЗАПЕРТ.
+ *
+ * Отдельное событие, а не вторая `pause`: та говорит «игра встала», а эта —
+ * «встала и сама не встанет». Их склейка в одно событие сделала бы невидимым
+ * именно то, что случилось в живом забеге 22.10.2026, где пауза по
+ * `orientation` не снималась никогда, а причиной был порог.
+ */
+export type PauseStuckData = { why: PauseWhy; heldMs: number }
+
+export const pauseStuck = (d: PauseStuckData): Of<'pause.stuck', PauseStuckData> => ({
+  type: 'pause.stuck',
+  data: d,
+})
+
+/**
  * Забег прерван и НЕ дошёл до конца: взрослый вышел в меню с паузы.
  *
  * Отдельно от `run.finish`, а не полем в нём: прерванный забег результатом не
@@ -463,9 +478,29 @@ export type CalibDoneData = {
 
 export const calibDone = (d: CalibDoneData): Of<'calib.done', CalibDoneData> => ({ type: 'calib.done', data: d })
 
-export const calibNeed = (d: {
+/**
+ * Калибровке чего-то не хватает — и ЧЕГО ИМЕННО видно по полям.
+ *
+ * Прежде писался только отказ `steady`, а случай «мало отсчётов» молчал. Это
+ * оставляло слепую зону ровно в самом частом отказе: 22.10.2026 три сессии
+ * подряд не прошли калибровку — камера работала, инференс шёл, — и в журнале
+ * об этом не было ни одной записи. Поле `valid` у `health` тут не свидетель:
+ * во время калибровки оно ноль всегда, по построению.
+ *
+ * `frames` и `withGeometry` отличают «никого в кадре» (кадры идут, геометрии
+ * в них нет) от «камера молчит» (кадров нет вовсе). `heldMs` — сколько стадия
+ * уже длится.
+ */
+export type CalibNeedData = {
   need: 'more' | 'steady'
-}): Of<'calib.need', { need: 'more' | 'steady' }> => ({ type: 'calib.need', data: d })
+  /** Кадров пришло на стадию калибровки. */
+  frames: number
+  /** Из них таких, где геометрия сошлась. */
+  withGeometry: number
+  heldMs: number
+}
+
+export const calibNeed = (d: CalibNeedData): Of<'calib.need', CalibNeedData> => ({ type: 'calib.need', data: d })
 
 export const calibStale = (d: {
   why: 'age' | 'aspect' | 'camera' | 'missing'

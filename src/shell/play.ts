@@ -18,12 +18,13 @@
 
 import { CONFIG } from '../core/config'
 import { geometry } from '../core/geometry'
+import type { Geometry } from '../core/geometry'
 import { isStale, makeCalibrator } from '../core/calibration'
 import type { Calibrator } from '../core/calibration'
 import { makeRun } from '../core/run'
 import type { Run, RunState } from '../core/run'
 import type { Calibration, Frame, Landmarks } from '../core/types'
-import { calibDone, calibNeed, pause as pauseEvent, resume as resumeEvent } from '../adapters/log/events'
+import { calibDone, calibNeed, pause as pauseEvent, pauseStuck, resume as resumeEvent } from '../adapters/log/events'
 import { roundJudge, roundPreview, roundSkip, roundWall, runAbort, runFinish, runStart } from '../adapters/log/events'
 import type { LogEvent, RawWhy } from '../adapters/log/store'
 import { rawBurst, rawPush, rawReset } from '../adapters/log/store'
@@ -31,6 +32,8 @@ import { timingsFor } from '../adapters/settings'
 import type { Settings } from '../adapters/settings'
 import type { Audio } from '../adapters/audio'
 import type { Scene } from '../adapters/render/canvas'
+import type { CalibScene } from '../adapters/render/calibrate'
+import { framing } from '../adapters/camera'
 import type { StepCounts } from './loop'
 import type { RunStage } from './screens/run'
 
@@ -41,6 +44,25 @@ import type { RunStage } from './screens/run'
  * — потому что разошедшиеся копии дали бы две разные просьбы на одном экране.
  */
 const CALIBRATION_HINT = 'Встань прямо и постой пять секунд'
+
+/**
+ * Раз в сколько жаловаться в журнал на незаконченную калибровку.
+ *
+ * Две секунды: достаточно редко, чтобы не съесть бюджет журнала (кадров
+ * двенадцать в секунду), и достаточно часто, чтобы по журналу было видно, что
+ * стадия тянется, а не прошла с первой попытки.
+ */
+const CALIB_TELL_MS = 2000
+
+/**
+ * Сколько сверх собственной длительности стадии ждать, прежде чем считать
+ * калибровку просроченной. Запас на то, что кадры идут не идеально ровно и
+ * первые отсчёты могли не сойтись.
+ */
+const CALIB_GRACE_MS = 2000
+
+/** Сколько живёт последний кадр силуэта на экране калибровки. */
+const CALIB_SILHOUETTE_TTL_MS = 1000
 
 /** Пока отношения сторон нет: ни одного кадра ещё не пришло. */
 const SEARCHING_HINT = 'Ищу камеру'
@@ -101,10 +123,12 @@ export type Play = {
   /**
    * Продвинуть игру до момента `t` накопленными кадрами.
    *
-   * Отдаёт сцену для рендера и числа для сводки здоровья. Сцена `null` —
-   * рисовать пока нечего (идёт калибровка: её рисует не рендер стены).
+   * Отдаёт либо сцену ЗАБЕГА, либо сцену КАЛИБРОВКИ — ровно одну из двух, —
+   * и числа для сводки здоровья. Пустой экран на калибровке неприемлем: пять
+   * секунд темноты неотличимы от сломанной игры (22.10.2026, три сессии
+   * подряд).
    */
-  step(t: number, frames: Frame[]): { scene: Scene | null; counts: StepCounts }
+  step(t: number, frames: Frame[]): { scene: Scene | null; calib: CalibScene | null; counts: StepCounts }
   stage(): RunStage
   /** Что сказать игроку поверх холста. Пустая строка — молчать. */
   hint(): string
@@ -123,8 +147,14 @@ export type Play = {
   resume(t: number): boolean
   /** Прервать забег: взрослый выходит в меню. Пишет `run.abort`. */
   abort(where: 'pause' | 'menu'): void
-  /** Стоит ли РУЧНАЯ пауза: только на ней показывается меню паузы. */
+  /** Стоит ли РУЧНАЯ пауза: на ней показывается меню паузы. */
   manual(): boolean
+  /**
+   * Автопауза ЗАПЕРЛАСЬ: держится дольше `presence.stuckMs` и сама не
+   * снимется. Оболочка показывает на ней меню паузы — иначе из забега нет
+   * выхода вовсе, что и случилось в живом забеге 22.10.2026.
+   */
+  stuck(): boolean
 }
 
 /** Сколько очков за исход — из конфига, а не числом здесь. */
@@ -149,6 +179,10 @@ export function makePlay(deps: PlayDeps): Play {
   let previewedAt: number | null = null
   /** Записанная причина паузы: иначе строка пишется на каждый кадр. */
   let pausedWhy: string | null = null
+  /** Когда встала нынешняя автопауза; `null` — её нет. */
+  let autoPausedAt: number | null = null
+  /** Запертость уже записана: событие одно на паузу, а не на кадр. */
+  let stuckLogged = false
   /**
    * Отношение сторон, которым судили последние кадры. Идёт в приговор: журнал
    * обязан нести число, ПО КОТОРОМУ судили, — иначе replay пересчитывает
@@ -156,6 +190,26 @@ export function makePlay(deps: PlayDeps): Play {
    * → `RoundJudgeData.aspect`
    */
   let judgedAspect = 0
+  /** Время последнего шага: им `stuck()` считает длительность паузы. */
+  let lastStepT = 0
+  /** Когда началась стадия калибровки; `null` — она не шла ни разу. */
+  let calibStartedAt: number | null = null
+  /** Кадров на стадии калибровки и из них с геометрией — для диагностики. */
+  let calibFrames = 0
+  let calibWithGeometry = 0
+  /**
+   * Пролёт ВРЕМЕНИ КАДРОВ, уже набранный годными отсчётами: от первого до
+   * последнего. Это ровно то, чего ждёт калибратор, и считается по часам
+   * кадра, а не тика — у них разные шкалы.
+   */
+  let calibFirstGoodT: number | null = null
+  let calibLastGoodT: number | null = null
+  /** Когда пришёл последний кадр стадии: по нему силуэт протухает. */
+  let calibFrameAt: number | null = null
+  /** Когда последний раз жаловались на нехватку: запись редкая. */
+  let calibToldAt = -Infinity
+  /** Последний скелет и его геометрия на стадии калибровки — для экрана. */
+  let calibLast: { lm: Landmarks | null; g: Geometry | null } = { lm: null, g: null }
   let finished = false
 
   /** Мотив исхода. `skip` звучит НЕ как провал — тот же инвариант, что у цвета. */
@@ -170,6 +224,53 @@ export function makePlay(deps: PlayDeps): Play {
     push: (t, lm) => rawPush(t, lm),
     burst: (why) => rawBurst(why),
     reset: () => rawReset(),
+  }
+
+  /**
+   * Сцена калибровки: что показать, пока забег ещё не начался.
+   *
+   * `framing` считается ТЕМ ЖЕ `framing()`, которым камера судит кадрирование
+   * — иначе рамка на экране обещала бы не то, что проверяет игра.
+   */
+  /**
+   * Силуэт ПРОТУХАЕТ: кадры приходят вчетверо реже тиков, и держать последний
+   * между ними обязательно, а держать его вечно — нет. Умерший источник иначе
+   * показывал бы замерший скелет в зелёной рамке, то есть уверял бы «камера
+   * кого-то видит» ровно в том случае, ради которого экран и заведён.
+   * Найдено код-ревью.
+   */
+  const staleSilhouette = (t: number): boolean =>
+    calibFrameAt === null || t - calibFrameAt > CALIB_SILHOUETTE_TTL_MS
+
+  function calibScene(t: number): CalibScene {
+    const span = CONFIG.calibration.durationMs
+    /*
+     * Прогресс — по ТОМУ, ЧТО НАБРАНО, а не по часам: время идёт и когда в
+     * кадре никого нет, а полоса, ползущая к концу у пустого кадра, обещает
+     * «вот-вот начнётся». Это самый обидный вид вранья — ребёнок смотрит
+     * именно на неё.
+     *
+     * Набранное — это ПРОЛЁТ ВРЕМЕНИ КАДРОВ между первым и последним годным
+     * отсчётом: ровно то, чего ждёт калибратор, и в его же шкале (часы кадра,
+     * не тика). Знаменателем числа отсчётов служить не может: `minSamples` —
+     * это нижняя граница (двадцать), она насыщается за полторы секунды, и
+     * дальше полоса снова поехала бы по часам. Найдено код-ревью.
+     */
+    const spanned = calibFirstGoodT !== null && calibLastGoodT !== null ? calibLastGoodT - calibFirstGoodT : 0
+    const enoughSamples = calibWithGeometry >= CONFIG.calibration.minSamples
+    const bySpan = span > 0 ? spanned / span : 0
+    return {
+      silhouette: staleSilhouette(t) ? null : calibLast.lm,
+      aspect: deps.aspect(),
+      /*
+       * Кадрирование судится по АБСОЛЮТНОЙ полосе, а не по калибровке: сюда
+       * приходят только тогда, когда годной калибровки нет (иначе забег уже
+       * начался бы), и мерить от её `S0` значило бы красить рамку по торсу,
+       * снятому на другой дистанции или другой камерой. Найдено код-ревью.
+       */
+      framing: framing(staleSilhouette(t) ? null : calibLast.g, null),
+      progress: Math.max(0, Math.min(1, enoughSamples ? bySpan : Math.min(bySpan, 0.95))),
+    }
   }
 
   /** Калибровка годна, если она есть и не устарела для нынешней камеры. */
@@ -247,19 +348,63 @@ export function makePlay(deps: PlayDeps): Play {
    */
   function calibrate(t: number, frames: Frame[], aspect: number): void {
     calibrator ??= makeCalibrator(aspect, cameraId())
+    calibStartedAt ??= t
 
     for (const f of frames) {
+      calibFrames += 1
       const g = geometry(f.lm, aspect)
-      if (g) calibrator.push(g, f.t)
+      calibLast = { lm: f.lm, g }
+      calibFrameAt = t
+      if (g) {
+        calibWithGeometry += 1
+        calibFirstGoodT ??= f.t
+        calibLastGoodT = f.t
+        calibrator.push(g, f.t)
+      }
     }
 
     const got = calibrator.done(wall())
     if ('need' in got) {
+      /*
+       * Числа стадии снимаются ДО сброса: иначе отказ `steady` сообщал бы
+       * нули — ровно в том единственном отказе, который писался и раньше, и
+       * ровно те поля, ради которых заводился. Найдено код-ревью.
+       */
+      const told = {
+        frames: calibFrames,
+        withGeometry: calibWithGeometry,
+        heldMs: Math.round(t - (calibStartedAt ?? t)),
+      }
+
       if (got.need === 'steady') {
         // Шевелился: этот экземпляр уже не отдаст калибровку никогда.
         calibrator = makeCalibrator(aspect, cameraId())
         hint = 'Постой спокойно ещё немного'
-        write(calibNeed({ need: 'steady' }))
+        // Отсчёт пошёл заново — и полоса ожидания на экране тоже: обещать
+        // «вот-вот начнём», когда стадия началась с нуля, значит врать.
+        calibStartedAt = t
+        // Счётчики стадии тоже с нуля: иначе журнал сообщал бы долю отсчётов
+        // от кадров ДВУХ разных попыток и врал бы ровно в диагностике.
+        calibFrames = 0
+        calibWithGeometry = 0
+        calibFirstGoodT = null
+        calibLastGoodT = null
+      }
+      /*
+       * О нехватке журнал говорит САМ, и в том числе про `more` — иначе
+       * «калибровка не идёт» не оставляет следов вовсе (так и вышло
+       * 22.10.2026, три сессии подряд). Но жалоба идёт только на ПРОСРОЧЕННУЮ
+       * стадию: первые пять секунд «мало отсчётов» — это нормальный ход
+       * калибровки, и писать его значило бы жаловаться на каждый удачный
+       * забег. Отказ `steady` пишется всегда: он не про срок, а про то, что
+       * ребёнок шевелился, и этот экземпляр калибратора уже не отдаст числа.
+       *
+       * Запись к тому же РЕДКАЯ: кадров приходит двенадцать в секунду.
+       */
+      const overdue = t - (calibStartedAt ?? t) >= CONFIG.calibration.durationMs + CALIB_GRACE_MS
+      if ((got.need === 'steady' || overdue) && t - calibToldAt >= CALIB_TELL_MS) {
+        calibToldAt = t
+        write(calibNeed({ need: got.need, ...told }))
       }
       return
     }
@@ -356,6 +501,22 @@ export function makePlay(deps: PlayDeps): Play {
       write(resumeEvent({ afterMs: 0 }))
     }
 
+    /*
+     * Запертость автопаузы: когда она встала и сколько держится. Ручная сюда
+     * не входит — у неё меню и так есть, и ждать от неё самостоятельного
+     * возврата никто не просил.
+     */
+    if (st.pauseWhy !== null && !st.manual) {
+      autoPausedAt ??= t
+      if (!stuckLogged && t - autoPausedAt >= CONFIG.presence.stuckMs) {
+        stuckLogged = true
+        write(pauseStuck({ why: st.pauseWhy, heldMs: Math.round(t - autoPausedAt) }))
+      }
+    } else {
+      autoPausedAt = null
+      stuckLogged = false
+    }
+
     if (st.phase === 'finished' && !finished) {
       finished = true
       const kinds = st.outcomes.map((o) => o.kind)
@@ -385,7 +546,12 @@ export function makePlay(deps: PlayDeps): Play {
        */
       if (aspect === null) {
         hint = SEARCHING_HINT
-        return { scene: null, counts: { valid: 0, lost: 0 } }
+        /*
+         * Кадра ещё не было — но экран калибровки показывается УЖЕ: область,
+         * куда встать, и поза, в которой стоять, от кадра не зависят, а
+         * тёмный экран неотличим от сломанной игры.
+         */
+        return { scene: null, calib: calibScene(t), counts: { valid: 0, lost: 0 } }
       }
 
       /*
@@ -401,17 +567,18 @@ export function makePlay(deps: PlayDeps): Play {
 
       // Число, которым судили эти кадры: уходит в приговор вместе с ним.
       judgedAspect = aspect
+      lastStepT = t
 
       if (!run) {
         if (usable(aspect)) startRun(t)
         else {
           calibrate(t, frames, aspect)
-          return { scene: null, counts: { valid: 0, lost: 0 } }
+          return { scene: null, calib: calibScene(t), counts: { valid: 0, lost: 0 } }
         }
       }
 
       const r = run
-      if (!r) return { scene: null, counts: { valid: 0, lost: 0 } }
+      if (!r) return { scene: null, calib: null, counts: { valid: 0, lost: 0 } }
 
       for (const f of frames) raw.push(f.t, f.lm)
 
@@ -452,7 +619,8 @@ export function makePlay(deps: PlayDeps): Play {
         const g = geometry(f.lm, aspect)
         if (g) valid++
       }
-      return { scene, counts: { valid, lost: frames.length - valid } }
+      // Забег идёт — сцена калибровки больше не нужна: ровно одна из двух.
+      return { scene, calib: null, counts: { valid, lost: frames.length - valid } }
     },
     pauseManual: (t) => {
       const r = run
@@ -517,6 +685,11 @@ export function makePlay(deps: PlayDeps): Play {
     },
 
     manual: () => run?.state.manual ?? false,
+    stuck: () => {
+      const st = run?.state
+      if (!st || st.pauseWhy === null || st.manual || autoPausedAt === null) return false
+      return lastStepT - autoPausedAt >= CONFIG.presence.stuckMs
+    },
     stage: () => stage,
     hint: () => hint,
     state: () => run?.state ?? null,

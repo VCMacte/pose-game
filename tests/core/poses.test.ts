@@ -3,7 +3,7 @@ import { AXES, axes, type Axis, type AxisReadings } from '../../src/core/axes'
 import { strictness } from '../../src/core/config'
 import { dependentAxes, limbImplications } from '../../src/core/dependencies'
 import { geometry } from '../../src/core/geometry'
-import { cutouts, POSES, type Toggles } from '../../src/core/poses'
+import { cutouts, NEUTRAL_SPEC, POSES, type Toggles } from '../../src/core/poses'
 import { POSE_TAGS, type Calibration, type Landmarks, type PoseSpec, type PoseTag } from '../../src/core/types'
 import { stick, type StickDesc } from '../../src/fake/stick'
 
@@ -104,6 +104,18 @@ function readPose(p: PoseSpec): AxisReadings {
   const lm = frame({ orientation: p.orientation, ...p.requires })
   return axes(lm, geometry(lm, ASPECT)!, CAL, 1)
 }
+
+test('нейтральная стойка НЕ входит в набор поз', () => {
+  /*
+   * `NEUTRAL_SPEC` существует ради рисунка на калибровке — «встань так». Выбор
+   * поз не вправе её предложить: «повтори стойку, в которой стоишь» не задача,
+   * и ребёнок прочёл бы это как сломанную игру.
+   */
+  expect(POSES.some((p) => p.id === NEUTRAL_SPEC.id)).toBe(false)
+  for (const tier of [1, 2, 3] as const) {
+    expect(cutouts(tier, {}).some((p) => p.id === NEUTRAL_SPEC.id)).toBe(false)
+  }
+})
 
 describe('набор', () => {
   test('13 названий и 18 вырезов: пять названий с зеркалом', () => {

@@ -10,7 +10,7 @@ test('CONFIG несёт все пороги из спека', () => {
   expect(CONFIG.judge.windowMs).toBe(600)
   expect(CONFIG.score.hit).toBe(3)
   expect(CONFIG.score.miss).toBe(-2)
-  expect(CONFIG.orientation.front).toBe(0.70)
+  expect(CONFIG.orientation.front).toBe(0.52)
   expect(CONFIG.orientation.profile).toBe(0.45)
 })
 

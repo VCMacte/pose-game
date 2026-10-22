@@ -362,6 +362,29 @@ function spec(e: Entry, mirror: boolean, mirrorId: string | undefined): PoseSpec
   }
 }
 
+/**
+ * Нейтральная стойка — НЕ поза набора, а то, как стоят на калибровке.
+ *
+ * Нужна рисунку: экран калибровки показывает, в какой позе встать, и строит
+ * его той же `figure()`, что превью и вырез. Пустые `requires` и означают
+ * нейтраль: `figure()` берёт каждую не затребованную ось в нейтральном
+ * состоянии — ноги вместе, опора на двух, корпус прямо, колени прямые, плечи
+ * вниз, локти прямые.
+ *
+ * **В `POSES` её нет и быть не должно:** выбор поз не вправе её предложить —
+ * «встань как стоишь» не задача. На это стоит тест.
+ */
+export const NEUTRAL_SPEC: PoseSpec = Object.freeze({
+  id: 'neutral',
+  name: 'Стойка',
+  tier: 1,
+  orientation: 'front',
+  mirror: false,
+  mirrorId: undefined,
+  requires: {},
+  tags: [],
+})
+
 /** Все вырезы набора: оригиналы и зеркала, в порядке возрастания ступени. */
 export const POSES: readonly PoseSpec[] = ENTRIES.flatMap((e) =>
   e.mirrored === true

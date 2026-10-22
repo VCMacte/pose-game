@@ -463,6 +463,50 @@ describe('меню паузы', () => {
     expect(byTest('to-menu')).not.toBeNull()
   })
 
+  test('на ЗАПЕРТОЙ автопаузе меню паузы показывается', async () => {
+    /*
+     * Живой забег 22.10.2026: пауза по `orientation` не снималась никогда
+     * (порог против игрока), меню на автопаузе не показывалось — и выйти из
+     * забега было нечем, кроме убийства приложения. Теперь оболочка
+     * спрашивает забег, не заперся ли он, и выпускает взрослого.
+     */
+    let onSample: ((f: { t: number; lm: Float32Array | null }, m: { w: number; h: number }) => void) | null = null
+    let frameCb: ((t: number) => void) | null = null
+    const a = app({
+      raf: (cb) => {
+        frameCb = cb
+        return 1
+      },
+      renderer: () => ({ render: () => {} }),
+      startPose: async (opts) => {
+        onSample = opts.onSample as typeof onSample
+        return async () => {}
+      },
+    })
+    a.go('run')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const { stick } = await import('../../src/fake/stick')
+    const { CONFIG } = await import('../../src/core/config')
+    const beat = (t: number, lm: Float32Array | null): void => {
+      onSample!({ t, lm }, { w: 640, h: 360 })
+      frameCb!(t)
+    }
+
+    // Калибровка нейтральной стойкой, потом забег, потом игрок исчез.
+    let t = 0
+    for (; t <= CONFIG.calibration.durationMs + 1500; t += 50) beat(t, stick({ aspect: 16 / 9 }))
+    expect(byTest('pause-menu')?.hidden).toBe(true)
+
+    const until = t + CONFIG.presence.pauseMs + CONFIG.presence.stuckMs + 1000
+    for (; t <= until; t += 50) beat(t, null)
+
+    expect(byTest('pause-menu')?.hidden).toBe(false)
+    // «Продолжить» при этом отключена: присутствие возврат не подтвердило.
+    expect((byTest('resume') as HTMLButtonElement).disabled).toBe(true)
+  })
+
   test('«Вернуться в меню» уводит в меню и ПРЕРЫВАЕТ забег', () => {
     /*
      * Продолжать с середины нечего: ребёнок уже ушёл от камеры, а половина

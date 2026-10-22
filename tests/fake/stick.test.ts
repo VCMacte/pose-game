@@ -411,7 +411,12 @@ describe('кадр рядом с порогом собирается число�
     // Полоса между порогами ориентации — та, на которой судья обязан отказать
     // по присутствию, а не промахнуться: собрать её нечем, если боковое
     // смещение в профиль — константа модуля.
-    const ratio = geometry(stick({ profileLateral: 0.65 }), ASPECT)!.shoulderRatio
+    /*
+     * Полоса сузилась: `front` снижен до 0.52 по живым измерениям (0.57 и
+     * 0.68 у игрока лицом к камере), а `profile` остался 0.45. Фикстура
+     * поэтому берёт боковое смещение 0.57 — ratio около 0.49, ровно между.
+     */
+    const ratio = geometry(stick({ profileLateral: 0.57 }), ASPECT)!.shoulderRatio
     expect(ratio).toBeGreaterThan(CONFIG.orientation.profile)
     expect(ratio).toBeLessThan(CONFIG.orientation.front)
   })

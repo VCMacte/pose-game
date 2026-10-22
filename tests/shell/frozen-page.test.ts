@@ -81,6 +81,35 @@ function harness(over: AppDeps = {}) {
   }
 }
 
+describe('экран калибровки не пустой', () => {
+  test('оболочка РИСУЕТ калибровку, а не оставляет чёрный экран', async () => {
+    /*
+     * «Смотреть на тёмный экран и ждать неприятно и непонятно». Прежде стадия
+     * калибровки не рисовала ничего: сцены не было, рендер не звали. Теперь
+     * оболочка отдаёт рендеру сцену калибровки — и делает это ДО первого
+     * кадра камеры тоже, иначе темнота остаётся в самом частом случае.
+     */
+    const calibs: number[] = []
+    const scenes: number[] = []
+    const h = harness({
+      renderer: () => ({
+        render: () => void scenes.push(1),
+        calibration: () => void calibs.push(1),
+      }),
+    })
+    h.a.go('run')
+
+    // Ни одного кадра камеры ещё не было — а рисовать уже есть что.
+    h.tick(16)
+    expect(calibs.length).toBeGreaterThan(0)
+    expect(scenes.length).toBe(0)
+
+    // Калибровка нейтральной стойкой: сцены забега пойдут после неё.
+    for (let t = 50; t <= CONFIG.calibration.durationMs + 2000; t += 50) h.beat(t)
+    expect(scenes.length).toBeGreaterThan(0)
+  })
+})
+
 describe('замершая страница посреди забега', () => {
   test('разрыв в минуту НЕ прокручивает раунды и не кончает забег', () => {
     const wrote: Array<Record<string, unknown>> = []

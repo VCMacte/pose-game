@@ -397,6 +397,217 @@ describe('звук исходов', () => {
  * решает, показывать ли меню. Модель `run-game`: ручная и автоматическая
  * различаются ПОЛЕМ, и меню показывается только на ручной.
  */
+describe('калибровка, которая не идёт', () => {
+  /*
+   * Слепая зона журнала, найденная 22.10.2026: три сессии подряд не прошли
+   * калибровку — камера работала, инференс шёл, а `calib.done` не было
+   * ни в одной. В журнале об этом НИ ОДНОЙ записи: `calib.need` писался
+   * только для `steady`, а случай «мало отсчётов» молчал. Поле `valid` у
+   * `health` тут не свидетель: во время калибровки оно ноль всегда.
+   *
+   * Поэтому стадия калибровки говорит о себе сама — с ограничением частоты,
+   * иначе запись пошла бы на каждый кадр.
+   */
+  function calibrating(frames: (t: number) => Float32Array | null) {
+    const log: Row[] = []
+    const settings = makeSettings({ store: memStore() })
+    const play = makePlay({
+      settings,
+      cal: null,
+      aspect: () => ASPECT,
+      write: (e) => void log.push({ t: log.length, type: e.type, ...(e.data as Record<string, unknown>) }),
+      rnd: makeRnd(1),
+      wall: () => 1_760_000_000_000,
+      cameraId: () => 'fake-cam',
+      source: 'fake',
+      raw: { push: () => {}, burst: () => {}, reset: () => {} },
+    })
+    for (let t = 0; t <= 12_000; t += 83) play.step(t, [{ t, lm: frames(t) }])
+    return { play, log }
+  }
+
+  test('стадия калибровки отдаёт СЦЕНУ, а не пустой экран', () => {
+    /*
+     * «Смотреть на тёмный экран и ждать неприятно и непонятно» — и это не
+     * вкусовое замечание: трижды подряд 22.10.2026 калибровка не прошла, а
+     * взрослому было нечем увидеть, видит ли игра кого-нибудь вообще.
+     * Поэтому стадия отдаёт сцену: силуэт, кадрирование и прогресс.
+     */
+    const seen: Array<{ progress: number; hasSkeleton: boolean; ok: boolean }> = []
+    const log: Row[] = []
+    const settings = makeSettings({ store: memStore() })
+    const play = makePlay({
+      settings,
+      cal: null,
+      aspect: () => ASPECT,
+      write: (e) => void log.push({ t: log.length, type: e.type, ...(e.data as Record<string, unknown>) }),
+      rnd: makeRnd(1),
+      wall: () => 1_760_000_000_000,
+      cameraId: () => 'fake-cam',
+      source: 'fake',
+      raw: { push: () => {}, burst: () => {}, reset: () => {} },
+    })
+
+    for (let t = 0; t <= 3000; t += 83) {
+      const got = play.step(t, [{ t, lm: stick({ aspect: ASPECT }) }])
+      if (got.calib) {
+        seen.push({
+          progress: got.calib.progress,
+          hasSkeleton: got.calib.silhouette !== null,
+          ok: got.calib.framing.ok,
+        })
+      }
+      // Сцена забега при этом молчит: стена ещё не едет.
+      expect(got.scene).toBeNull()
+    }
+
+    expect(seen.length).toBeGreaterThan(10)
+    expect(seen[0].hasSkeleton).toBe(true)
+    // Прогресс растёт: по нему видно, сколько ещё стоять.
+    expect(seen[seen.length - 1].progress).toBeGreaterThan(seen[0].progress)
+    expect(seen[seen.length - 1].progress).toBeLessThanOrEqual(1)
+  })
+
+  test('полоса ожидания НЕ растёт, пока игрока не видно', () => {
+    /*
+     * Иначе она врёт самым обидным образом: ребёнка в кадре нет, набирать
+     * нечего, а полоса ползёт к концу и обещает, что вот-вот начнётся. Снято
+     * с экрана проверкой в браузере на сценарии `leave-frame`.
+     */
+    const settings = makeSettings({ store: memStore() })
+    const play = makePlay({
+      settings,
+      cal: null,
+      aspect: () => ASPECT,
+      write: () => {},
+      rnd: makeRnd(1),
+      cameraId: () => 'fake-cam',
+      source: 'fake',
+      raw: { push: () => {}, burst: () => {}, reset: () => {} },
+    })
+
+    let last = 0
+    for (let t = 0; t <= 4000; t += 83) last = play.step(t, [{ t, lm: null }]).calib?.progress ?? -1
+    expect(last).toBe(0)
+
+    // Игрок встал в кадр — полоса пошла.
+    for (let t = 4100; t <= 6000; t += 83) last = play.step(t, [{ t, lm: stick({ aspect: ASPECT }) }]).calib?.progress ?? -1
+    expect(last).toBeGreaterThan(0)
+  })
+
+  test('нет кадров — сцена калибровки всё равно есть, с пустым силуэтом', () => {
+    // Иначе до первого кадра экран снова тёмный, а это и есть самый частый
+    // случай: камера ещё не отдала ни одного кадра.
+    const { play } = calibrating(() => null)
+    void play
+    const settings = makeSettings({ store: memStore() })
+    const solo = makePlay({
+      settings,
+      cal: null,
+      aspect: () => ASPECT,
+      write: () => {},
+      rnd: makeRnd(1),
+      cameraId: () => 'fake-cam',
+      source: 'fake',
+      raw: { push: () => {}, burst: () => {}, reset: () => {} },
+    })
+    const got = solo.step(0, [])
+    expect(got.calib).not.toBeNull()
+    expect(got.calib?.silhouette).toBeNull()
+    expect(got.calib?.framing.ok).toBe(false)
+  })
+
+  test('пустые кадры: журнал ГОВОРИТ, что калибровке не хватает отсчётов', () => {
+    const { play, log } = calibrating(() => null)
+    expect(play.state()).toBeNull()
+    const needs = log.filter((e) => e.type === 'calib.need')
+    expect(needs.length).toBeGreaterThan(0)
+    expect(needs[0].need).toBe('more')
+    // Видно, что кадры ИДУТ, а геометрии в них нет — это «никого в кадре»,
+    // а не «камера молчит».
+    expect(Number(needs[0].frames)).toBeGreaterThan(0)
+    expect(needs[0].withGeometry).toBe(0)
+  })
+
+  test('отказ steady несёт ЧИСЛА стадии, а не нули', () => {
+    /*
+     * Найдено код-ревью: сброс счётчиков стоял ПЕРЕД записью, и событие, ради
+     * диагностики которого поля и заводились, сообщало `frames: 0,
+     * withGeometry: 0, heldMs: 0` — то есть ровно ничего, и именно в том
+     * отказе, который писался и раньше.
+     */
+    const log: Row[] = []
+    const settings = makeSettings({ store: memStore() })
+    const play = makePlay({
+      settings,
+      cal: null,
+      aspect: () => ASPECT,
+      write: (e) => void log.push({ t: log.length, type: e.type, ...(e.data as Record<string, unknown>) }),
+      rnd: makeRnd(1),
+      wall: () => 1_760_000_000_000,
+      cameraId: () => 'fake-cam',
+      source: 'fake',
+      raw: { push: () => {}, burst: () => {}, reset: () => {} },
+    })
+
+    // Ребёнок ёрзает: центр гуляет втрое выше порога `steadyCx`.
+    for (let t = 0; t <= 9000; t += 83) {
+      const x = (t / 83) % 2 === 0 ? 0.45 : 0.55
+      play.step(t, [{ t, lm: stick({ aspect: ASPECT, x }) }])
+    }
+
+    const steady = log.filter((e) => e.type === 'calib.need' && e.need === 'steady')
+    expect(steady.length).toBeGreaterThan(0)
+    expect(Number(steady[0].frames)).toBeGreaterThan(0)
+    expect(Number(steady[0].withGeometry)).toBeGreaterThan(0)
+    expect(Number(steady[0].heldMs)).toBeGreaterThan(0)
+  })
+
+  test('полоса не доползает до конца, если игрок ушёл ПОСРЕДИ стадии', () => {
+    /*
+     * Найдено код-ревью: знаменатель брался от `minSamples` (20), то есть
+     * насыщался за полторы секунды, после чего полоса ехала по часам — ровно
+     * та ложь, которую этот прогресс и заводился убрать. Ребёнок постоял две
+     * секунды и отошёл поправить штатив, а полоса обещает «вот-вот».
+     */
+    const settings = makeSettings({ store: memStore() })
+    const play = makePlay({
+      settings,
+      cal: null,
+      aspect: () => ASPECT,
+      write: () => {},
+      rnd: makeRnd(1),
+      cameraId: () => 'fake-cam',
+      source: 'fake',
+      raw: { push: () => {}, burst: () => {}, reset: () => {} },
+    })
+
+    let p = 0
+    for (let t = 0; t <= 2000; t += 83) p = play.step(t, [{ t, lm: stick({ aspect: ASPECT }) }]).calib?.progress ?? -1
+    const stoodFor2s = p
+    expect(stoodFor2s).toBeGreaterThan(0)
+
+    // Ушёл: кадры идут, игрока в них нет.
+    for (let t = 2100; t <= 8000; t += 83) p = play.step(t, [{ t, lm: null }]).calib?.progress ?? -1
+    expect(p).toBeCloseTo(stoodFor2s, 2)
+    expect(p).toBeLessThan(0.8)
+  })
+
+  test('запись о нехватке идёт РЕДКО, а не на каждый кадр', () => {
+    // Двенадцать секунд при 12 Гц — это 145 кадров; записей обязано быть
+    // единицы, иначе бюджет журнала съест сама жалоба.
+    const { log } = calibrating(() => null)
+    expect(log.filter((e) => e.type === 'calib.need').length).toBeLessThan(10)
+  })
+
+  test('нейтральная стойка калибровку ПРОХОДИТ и жалоб не оставляет', () => {
+    const { play, log } = calibrating(() => stick({ aspect: ASPECT }))
+    expect(play.state()).not.toBeNull()
+    expect(log.some((e) => e.type === 'calib.done')).toBe(true)
+    expect(log.filter((e) => e.type === 'calib.need').length).toBe(0)
+  })
+})
+
 describe('ручная пауза в забеге', () => {
   /** Забег, которым можно управлять покадрово. */
   function interactive(opts: { script?: FakeScript; tier: 1 | 2 | 3 }) {
@@ -484,6 +695,48 @@ describe('ручная пауза в забеге', () => {
     expect(play.state()?.phase).toBe('paused')
     expect(play.manual()).toBe(false)
     expect(play.state()?.pauseWhy).not.toBeNull()
+  })
+
+  test('АВТОПАУЗА, из которой не выйти, выпускает взрослого в меню', () => {
+    /*
+     * Случай из живого забега 22.10.2026 вечером: присутствие отвергало каждый
+     * кадр по `orientation` (отношение плеч к торсу 0.68 при пороге 0.70), и
+     * забег заперся навсегда. Выйти было нечем: меню паузы показывается только
+     * на РУЧНОЙ паузе, а автопауза ждёт подтверждения присутствия, которое при
+     * неподходящем пороге не придёт никогда. Взрослому оставалось убить
+     * приложение — в журнале сессия так и обрывается.
+     *
+     * Поэтому автопауза, которая держится слишком долго, перестаёт быть
+     * «подожди» и становится «так не получится»: меню паузы показывается, и
+     * из забега есть выход. Возобновиться она при этом не мешает.
+     */
+    const { play, log, run } = interactive({ tier: 1 })
+    run(0, 1500)
+    // Игрок исчез: автопауза встаёт и держится.
+    run(1600, 1600 + CONFIG.presence.pauseMs + 500, false)
+    expect(play.state()?.pauseWhy).not.toBeNull()
+    expect(play.manual()).toBe(false)
+    expect(play.stuck()).toBe(false)
+
+    // Держится дольше срока — забег заперт.
+    run(3200, 3200 + CONFIG.presence.stuckMs + 500, false)
+    expect(play.stuck()).toBe(true)
+    expect(log.filter((e) => e.type === 'pause.stuck').length).toBe(1)
+
+    // Игрок вернулся — запертость снимается вместе с паузой.
+    run(16_000, 18_000, true)
+    expect(play.state()?.pauseWhy).toBeNull()
+    expect(play.stuck()).toBe(false)
+  })
+
+  test('ручная пауза запертой НЕ считается: у неё меню и так есть', () => {
+    const { play, log, run } = interactive({ tier: 1 })
+    run(0, 1000)
+    play.pauseManual(1100)
+    run(1200, 1200 + CONFIG.presence.stuckMs + 1000, true)
+    expect(play.manual()).toBe(true)
+    expect(play.stuck()).toBe(false)
+    expect(log.some((e) => e.type === 'pause.stuck')).toBe(false)
   })
 
   test('возврат с ручной паузы продолжает забег и пишет resume', () => {

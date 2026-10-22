@@ -18,10 +18,22 @@ import { createRenderer } from '../adapters/render/canvas'
 import type { Renderer } from '../adapters/render/canvas'
 import { dropCaches } from '../adapters/sw'
 import { frameAspect } from '../adapters/camera'
-import { ORIENTATION, browserOrientation, lockOrientation as lockScreenOrientation } from '../adapters/orientation'
+import {
+  ORIENTATION,
+  browserOrientation,
+  installedApp,
+  lockOrientation as lockScreenOrientation,
+} from '../adapters/orientation'
 import type { LockResult } from '../adapters/orientation'
 import type { AspectSource } from '../adapters/camera'
-import { alarm as alarmEvent, visibility as visibilityEvent } from '../adapters/log/events'
+import {
+  alarm as alarmEvent,
+  build as buildEvent,
+  error as errorEvent,
+  errorPromise,
+  sessionStart,
+  visibility as visibilityEvent,
+} from '../adapters/log/events'
 import { write as journalWrite } from '../adapters/log/store'
 import type { LogEvent } from '../adapters/log/store'
 import { makeSettings, timingsFor, toggleBlocked } from '../adapters/settings'
@@ -486,8 +498,15 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
         stage = thePlay.stage()
         screenRun.say(thePlay.hint())
         refreshPause()
-        // Сцена `null` — рисовать нечего (идёт калибровка или нет кадра).
+        /*
+         * Ровно одна из двух картинок: забег или калибровка. Прежде на
+         * калибровке не рисовалось ничего — пять секунд темноты, неотличимой
+         * от сломанной игры, и взрослому нечем увидеть, видит ли камера
+         * кого-нибудь вообще.
+         * → `docs/render-and-layout.md`
+         */
         if (got.scene && renderer) renderer.render(got.scene)
+        else if (got.calib && renderer) renderer.calibration?.(got.calib)
         // Снятая калибровка переживает забег: ребёнок не сдаёт её каждый раз.
         calibration = thePlay.calibration()
         return got.counts
@@ -535,10 +554,14 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   }
 
   /**
-   * Меню паузы — только на РУЧНОЙ паузе.
+   * Меню паузы — на РУЧНОЙ паузе и на ЗАПЕРТОЙ автопаузе.
    *
-   * На автопаузе ребёнок всего лишь вышел из кадра, и предлагать там «вернуться
-   * в меню» значило бы предлагать бросить забег из-за секундной отлучки.
+   * На обычной автопаузе ребёнок всего лишь вышел из кадра, и предлагать там
+   * «вернуться в меню» значило бы предлагать бросить забег из-за секундной
+   * отлучки. Но автопауза, которая держится дольше `presence.stuckMs`, сама
+   * уже не снимется, и без меню выхода из забега нет вовсе — это и случилось
+   * в живом забеге 22.10.2026.
+   * → `docs/presence-and-pause.md`
    */
   function refreshPause(): void {
     if (!rs || !play) return
@@ -551,8 +574,17 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
       rs.finishMenu(true)
       return
     }
-    const manual = play.manual()
-    rs.pauseMenu(manual, play.state()?.canResume ?? false)
+    /*
+     * Меню показывается и на ЗАПЕРТОЙ автопаузе — той, что держится дольше
+     * `presence.stuckMs` и сама не снимется. Без этого из забега нет выхода
+     * вовсе: в живом забеге 22.10.2026 пауза по `orientation` стояла навсегда
+     * (порог оказался против игрока), и взрослому осталось убить приложение.
+     * Кнопка «Продолжить» при этом по-прежнему ждёт подтверждения
+     * присутствия — запертость не делает возврат дешевле.
+     * → `docs/presence-and-pause.md`
+     */
+    const open = play.manual() || play.stuck()
+    rs.pauseMenu(open, play.state()?.canResume ?? false)
   }
 
   function draw(): void {
@@ -708,6 +740,67 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   }
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
 
+  /*
+   * Необработанные ошибки страницы — В ЖУРНАЛ, и это тот же класс пробела,
+   * что был у `build`: конструкторы есть, документация их перечисляет, сводка
+   * их считает — а звал их никто. Уронённый на штативе забег не оставлял
+   * следа вовсе, и разбор печатал «ошибок: 0».
+   *
+   * Слушатели снимаются вместе с приложением: иначе они пишут в журнал от
+   * имени погашенного.
+   */
+  const onError = (e: Event): void => {
+    if (stopped) return
+    const err = e as ErrorEvent
+    ;(deps.write ?? journalWrite)(
+      errorEvent({
+        message: String(err.message ?? 'ошибка без текста'),
+        ...(err.filename ? { source: String(err.filename) } : {}),
+        ...(typeof err.lineno === 'number' ? { line: err.lineno } : {}),
+        ...(typeof err.colno === 'number' ? { col: err.colno } : {}),
+      }),
+    )
+  }
+  const onRejection = (e: Event): void => {
+    if (stopped) return
+    const reason = (e as Event & { reason?: unknown }).reason
+    ;(deps.write ?? journalWrite)(
+      errorPromise({ reason: reason instanceof Error ? reason.message : String(reason ?? 'без причины') }),
+    )
+  }
+  if (typeof window !== 'undefined') {
+    window.addEventListener('error', onError)
+    window.addEventListener('unhandledrejection', onRejection)
+  }
+
+  /*
+   * Первыми двумя записями журнал говорит, КЕМ он написан.
+   *
+   * Разбор журнала 22.10.2026 показал, что обе записи отсутствовали во всех
+   * семи сессиях: конструкторы событий были, а звал их никто. По такому
+   * журналу нельзя установить сборку, а установленное PWA обновляется само и
+   * молча — журнал со вчерашнего кода выглядит точно так же, как с
+   * сегодняшнего. Номер берётся ИЗ ТОЙ ЖЕ сводки, что показывает служебный
+   * экран: две копии версии разошлись бы.
+   * → `docs/offline-and-build.md`
+   */
+  {
+    const write = deps.write ?? journalWrite
+    const info = serviceInfo().build
+    write(
+      sessionStart({
+        startedAt: new Date().toISOString(),
+        screen:
+          typeof window === 'undefined'
+            ? 'неизвестно'
+            : `${window.innerWidth}x${window.innerHeight}@${window.devicePixelRatio}`,
+        installed: installedApp(),
+        lang: typeof navigator === 'undefined' ? 'неизвестно' : navigator.language,
+      }),
+    )
+    write(buildEvent({ version: info.version, builtAt: info.date }))
+  }
+
   draw()
 
   return {
@@ -726,6 +819,10 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
       // Слушатель видимости висит на `document` и приложение не переживает:
       // не снятый, он пишет в журнал от имени погашенного приложения.
       if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('error', onError)
+        window.removeEventListener('unhandledrejection', onRejection)
+      }
       stopFrames()
     },
   }

@@ -62,10 +62,20 @@ export type LockResult = {
 
 const says = (e: unknown): string => (e instanceof Error ? e.message : String(e))
 
+/**
+ * Запущено ли как УСТАНОВЛЕННОЕ приложение, а не вкладка браузера.
+ *
+ * Живёт здесь и в единственном экземпляре: от этого ответа зависит и просьба
+ * о полном экране (у приложения это режим окна), и запись о сессии в журнал.
+ * Две копии одного `matchMedia` однажды разошлись бы условием.
+ */
+export const installedApp = (): boolean =>
+  typeof matchMedia === 'function' && matchMedia('(display-mode: fullscreen)').matches
+
 /** Браузерные зависимости. Отсутствие API — такой же отказ, как и запрет. */
 export function browserOrientation(): OrientationDeps {
   return {
-    installed: typeof matchMedia === 'function' && matchMedia('(display-mode: fullscreen)').matches,
+    installed: installedApp(),
     lock: async (want) => {
       /*
        * `lock` описан в Screen Orientation API, но не в тех `lib.dom`, с

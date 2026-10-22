@@ -38,6 +38,39 @@ test('пороги присутствия лежат в CONFIG одним бло
   expect(CONFIG.presence.resumeMs).toBe(500)
 })
 
+/*
+ * ИЗМЕРЕННЫЕ на телефоне отношения плеч к торсу. Фронтальная стойка живого
+ * человека читается ЗАМЕТНО ниже синтетической (0.86 у `stick`): два живых
+ * журнала 22.10.2026 дали 0.57 (кадр 360×640) и 0.68 (кадр 640×360), оба при
+ * `vis: 1.00` и игроке лицом к камере. Прежний порог `front: 0.70` отвергал и
+ * то, и другое — забег запирался на автопаузе `orientation` навсегда.
+ *
+ * Тот же урок измерен в `run-game`: «плечи к торсу 0.18–0.44 при пороге 0.45 и
+ * физически верных 0.86». Два проекта, один вывод: геометрическая оценка этого
+ * отношения завышена, и жить порог обязан по измерению.
+ */
+const ЖИВЫЕ_ФРОНТ = [0.57, 0.68] as const
+
+/** Геометрия с заданным отношением плеч к торсу: остальное — нейтраль. */
+const withRatio = (ratio: number): Geometry => ({ ...g({}), shoulderRatio: ratio })
+
+test('ИЗМЕРЕННАЯ фронтальная стойка проходит присутствие', () => {
+  for (const ratio of ЖИВЫЕ_ФРОНТ) {
+    const st = trusting(0.5, withRatio(ratio).S)
+    const r = presence(withRatio(ratio), 0, st, 'front')
+    expect(r.ok, `отношение ${ratio} обязано читаться как фронт`).toBe(true)
+  }
+})
+
+test('между фронтом и профилем остаётся мёртвая зона', () => {
+  // Иначе профиль, прочитанный как фронт, зачёл бы позу, которой не было.
+  expect(CONFIG.orientation.profile).toBeLessThan(CONFIG.orientation.front)
+  const middle = (CONFIG.orientation.profile + CONFIG.orientation.front) / 2
+  const st = trusting(0.5, withRatio(middle).S)
+  expect(presence(withRatio(middle), 0, st, 'front').ok).toBe(false)
+  expect(presence(withRatio(middle), 0, st, 'profile').ok).toBe(false)
+})
+
 test('g === null даёт why: none', () => {
   const st = trusting(0.5, 0.22)
   expect(presence(null, 0, st, 'front')).toEqual({ ok: false, why: 'none' })

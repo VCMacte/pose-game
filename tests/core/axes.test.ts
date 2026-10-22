@@ -361,10 +361,11 @@ describe('присед', () => {
 })
 
 describe('ориентация', () => {
-  test('front > 0.70, profile < 0.45, между — unknown', () => {
+  test('выше front — фронт, ниже profile — профиль, между — unknown', () => {
     expect(read({}).orientation.state).toBe('front')
     expect(read({ orientation: 'profile' }).orientation.state).toBe('profile')
-    const between = read({ profileLateral: 0.65 })
+    // 0.57 бокового смещения даёт ratio около 0.49 — между 0.45 и 0.52.
+    const between = read({ profileLateral: 0.57 })
     expect(between.orientation.state).toBe('unknown')
     expect(between.orientation.measured).toBeGreaterThan(CONFIG.orientation.profile)
     expect(between.orientation.measured).toBeLessThan(CONFIG.orientation.front)
@@ -515,7 +516,7 @@ test('каждая ось из AXES хоть где-то определена и
     { leftShoulder: 65 },
     { leftElbow: 130 },
     { leftElbow: 'bent', leftForearm: 90 },
-    { profileLateral: 0.65 },
+    { profileLateral: 0.57 },
     { orientation: 'profile', lean: 40 },
     { lean: 'horizontal', visibilityOf: FEET_GONE },
     { ...ROCKET, visibilityOf: { nose: 0, leftEye: 0, rightEye: 0 } },

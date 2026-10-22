@@ -142,6 +142,75 @@ describe('смена источника позы между забегами', (
   })
 })
 
+describe('журнал знает, какая сборка его написала', () => {
+  test('на старте приложения пишутся session.start и build', () => {
+    /*
+     * Найдено разбором журнала 22.10.2026: ни одной записи `build` ни в одной
+     * из семи сессий — конструкторы событий были, а вызывал их НИКТО. То есть
+     * установить по журналу, какой код его написал, было нельзя, хотя
+     * `docs/offline-and-build.md` это обещает. Установленное PWA обновляется
+     * само и молча, и журнал со вчерашней сборки выглядит точно так же, как с
+     * сегодняшней.
+     */
+    const wrote: Array<Record<string, unknown>> = []
+    harness({
+      write: (e) => void wrote.push({ type: e.type, ...e.data }),
+      serviceInfo: () => ({
+        log: { sessions: 0, events: 0, bytes: 0, broken: false },
+        latency: null,
+        build: { version: '20261022-1830', date: '22.10.2026 18:30', modelCached: true },
+      }),
+    })
+
+    const build = wrote.find((e) => e.type === 'build')
+    expect(build).toBeDefined()
+    // Номер берётся ОТТУДА ЖЕ, откуда его показывает служебный экран.
+    expect(build!.version).toBe('20261022-1830')
+
+    const start = wrote.find((e) => e.type === 'session.start')
+    expect(start).toBeDefined()
+    expect(String(start!.startedAt)).toMatch(/^\d{4}-\d{2}-\d{2}T/)
+    expect(typeof start!.installed).toBe('boolean')
+  })
+
+  test('необработанная ошибка страницы попадает в ЖУРНАЛ', () => {
+    /*
+     * Найдено код-ревью, и это ровно тот же класс, что `build`: конструкторы
+     * `error` и `error.promise` есть, документация их перечисляет, сводка их
+     * считает — а вызывал их НИКТО. Уроненный на штативе забег не оставлял
+     * следа: `log-report` печатал «ошибок: 0».
+     */
+    const wrote: Array<Record<string, unknown>> = []
+    const h = harness({ write: (e) => void wrote.push({ type: e.type, ...e.data }) })
+
+    window.dispatchEvent(
+      new ErrorEvent('error', { message: 'ой', filename: 'app.ts', lineno: 7, error: new Error('ой') }),
+    )
+    const rejection = new Event('unhandledrejection') as Event & { reason?: unknown }
+    rejection.reason = new Error('обещание не сдержано')
+    window.dispatchEvent(rejection)
+
+    expect(wrote.some((e) => e.type === 'error' && /ой/.test(String(e.message)))).toBe(true)
+    expect(wrote.some((e) => e.type === 'error.promise' && /обещание/.test(String(e.reason)))).toBe(true)
+
+    // Остановленное приложение ошибки больше не слушает.
+    h.a.stop()
+    const before = wrote.length
+    window.dispatchEvent(new ErrorEvent('error', { message: 'после остановки' }))
+    expect(wrote.length).toBe(before)
+  })
+
+  test('пишутся ОДИН раз, а не на каждую перерисовку', () => {
+    const wrote: Array<Record<string, unknown>> = []
+    const h = harness({ write: (e) => void wrote.push({ type: e.type, ...e.data }) })
+    h.a.go('run')
+    h.a.go('menu')
+    h.a.go('settings')
+    expect(wrote.filter((e) => e.type === 'build').length).toBe(1)
+    expect(wrote.filter((e) => e.type === 'session.start').length).toBe(1)
+  })
+})
+
 describe('замер задержки на служебном экране', () => {
   test('замер НАЗЫВАЕТ ближайшую ступень сдвига, но не выставляет её', async () => {
     /*
