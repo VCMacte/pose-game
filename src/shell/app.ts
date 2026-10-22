@@ -19,6 +19,7 @@ import type { Renderer } from '../adapters/render/canvas'
 import { dropCaches } from '../adapters/sw'
 import { frameAspect } from '../adapters/camera'
 import type { AspectSource } from '../adapters/camera'
+import { alarm as alarmEvent } from '../adapters/log/events'
 import { write as journalWrite } from '../adapters/log/store'
 import type { LogEvent } from '../adapters/log/store'
 import { makeSettings, timingsFor, toggleBlocked } from '../adapters/settings'
@@ -82,6 +83,16 @@ export type StartPoseOpts = {
   source: 'camera' | 'fake'
   onSample(f: Frame, meta: { w: number | null; h: number | null }): void
   onStatus(s: { kind: string }): void
+  /**
+   * Камера открылась и назвала себя. Приходит ПОЗЖЕ старта забега — камера
+   * открывается не мгновенно, — поэтому опознание спрашивается в момент съёма
+   * калибровки, а не передаётся забегу значением.
+   *
+   * Им живёт половина `isStale()`, та, что ловит смену камеры. Без него в
+   * калибровке стоял `'unknown'`, и сторож сравнивал `'unknown'` с
+   * `'unknown'`: в журнале живого забега 22.10.2026 так и записано.
+   */
+  onCamera?(info: { deviceId: string | null }): void
   script?: string
 }
 
@@ -117,7 +128,17 @@ async function defaultStartPose(opts: StartPoseOpts): Promise<() => Promise<void
     source: opts.source,
     onSample: (f, meta) => opts.onSample(f, meta),
     onStatus: (st) => opts.onStatus(st),
-    openCamera: () => openCamera(),
+    /*
+     * Камера открывается ЗДЕСЬ, и здесь же единственное место, где видно её
+     * опознание: `openCamera` отдаёт поток, а `deviceId` живёт в настройках
+     * дорожки. Дальше оно уходит в оболочку и попадает в калибровку.
+     */
+    openCamera: async () => {
+      const cam = await openCamera()
+      const id = cam.stream.getVideoTracks()[0]?.getSettings().deviceId ?? null
+      opts.onCamera?.({ deviceId: id })
+      return cam
+    },
     ...(fakeFrames ? { fakeFrames } : {}),
     ...(opts.script !== undefined ? { script: opts.script } : {}),
   })
@@ -166,6 +187,8 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
 
   let screen: ScreenName = 'menu'
   let latency: { medianMs: number; spreadMs: number } | null = null
+  /** Чем кончился отказавший замер. `null` — отказа не было. */
+  let latencyFailed: string | null = null
   let stopped = false
   let rafId: number | null = null
   let stage: RunStage | null = null
@@ -186,6 +209,8 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   let calibration: Calibration | null = null
   /** Источники отношения сторон кадра. Пополняются источником позы. */
   const aspectSource: AspectSource = {}
+  /** Опознание камеры нынешнего забега. `null` — она ещё не назвалась. */
+  let cameraId: string | null = null
   /** Ступень, которая сошла, либо `null`. Переживает `ready`: см. `onStatus`. */
   let fellPipeline: string | null = null
   const debug: Debug & { rawAlways?: boolean } = { source: 'камера', pipeline: 'авто' }
@@ -241,6 +266,26 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
 
   function startFrames(): void {
     /*
+     * Отношение сторон и опознание камеры ЗАБЫВАЮТСЯ на каждом забеге, и это
+     * не гигиена, а защита калибровки.
+     *
+     * Забег стартует раньше, чем открывается камера, и прежде источники
+     * отношения сторон жили один раз на всё приложение. На живом телефоне
+     * 22.10.2026 это отдало в живой забег калибровку СИНТЕТИЧЕСКОГО игрока:
+     * `aspect()` вернул 1.7778 от прошлого источника, `isStale()` сравнил его
+     * сам с собой и признал калибровку свежей, а камера потом дала 360×640,
+     * то есть 0.5625. Все промахи того забега недостоверны.
+     *
+     * Пустые источники означают «кадра ещё не было»: забег на них ничего не
+     * считает и ждёт — `SEARCHING_HINT` в `play.ts`.
+     * → `docs/calibration.md`
+     */
+    aspectSource.frame = null
+    aspectSource.video = null
+    aspectSource.track = null
+    cameraId = null
+
+    /*
      * Часы берутся те же, по которым идёт такт экрана: ручная пауза ставится в
      * ИГРОВОЕ время, и взять их из другого источника значило бы попросить ядро
      * остановиться в момент, которого оно не видело.
@@ -267,6 +312,32 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     })
     rs = screenRun
 
+    /*
+     * Тревога идёт НА ЭКРАН И В ЖУРНАЛ одной дорогой.
+     *
+     * Консоли на штативе нет, экран живёт ровно столько, сколько на него
+     * смотрят, и тревога, не попавшая в журнал, для разбора не существует:
+     * в живом забеге 22.10.2026 вертикальный кадр камеры был виден на экране,
+     * а в журнале его нет — и установить, показалось ли предупреждение,
+     * оказалось нечем.
+     *
+     * Запись по СМЕНЕ текста: кадры идут пятьдесят раз в секунду, и повтор
+     * одной и той же строки вытеснил бы из журнала сам забег. Снятая тревога
+     * (`null`) забывается — та же строка через минуту снова новость.
+     * → `docs/log-and-storage.md`
+     */
+    let alarmed: string | null = null
+    const alarm = (text: string | null): void => {
+      screenRun.alarm(text)
+      if (text === null) {
+        alarmed = null
+        return
+      }
+      if (text === alarmed) return
+      alarmed = text
+      ;(deps.write ?? journalWrite)(alarmEvent({ text }))
+    }
+
     let renderer: Renderer | null = null
     try {
       renderer = makeRenderer(screenRun.canvas)
@@ -275,7 +346,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
        * Нет Canvas2D — сказать вслух и остаться на экране: молча не рисующая
        * игра на штативе неотличима от мёртвой камеры.
        */
-      screenRun.alarm('Рисовать нечем: холст недоступен')
+      alarm('Рисовать нечем: холст недоступен')
     }
 
     /*
@@ -290,6 +361,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
       settings,
       cal: calibration,
       aspect: () => frameAspect(aspectSource),
+      cameraId: () => cameraId,
       write: deps.write ?? journalWrite,
       rnd: deps.rnd ?? Math.random,
       source: debug.source === 'фейк' ? 'fake' : 'camera',
@@ -321,13 +393,16 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
            * журнале остаётся `aspect: 0.5625`, и прочесть по нему «телефон
            * держали вертикально» можно, только зная, что так бывает.
            */
-          if (meta.h > meta.w) screenRun.alarm('Кадр камеры вертикальный — поверни телефон')
+          if (meta.h > meta.w) alarm('Кадр камеры вертикальный — поверни телефон')
         }
         theLoop.sample(f)
       },
+      onCamera: (info) => {
+        cameraId = info.deviceId
+      },
       onStatus: (st) => {
-        if (st.kind === 'exhausted') screenRun.alarm('Камеры нет: позы не будет')
-        if (st.kind === 'camera-lost') screenRun.alarm('Камера пропала')
+        if (st.kind === 'exhausted') alarm('Камеры нет: позы не будет')
+        if (st.kind === 'camera-lost') alarm('Камера пропала')
         /*
          * Просевшая ступень лестницы конвейеров раньше не говорила ничего:
          * «не завёлся GPU», «нет MediaStreamTrackProcessor», «воркер умер» —
@@ -337,7 +412,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
         if (st.kind === 'down') {
           const d = st as unknown as { pipeline?: string }
           fellPipeline = d.pipeline ?? 'верхняя'
-          screenRun.alarm(`Распознавание просело: ступень ${fellPipeline} сошла`)
+          alarm(`Распознавание просело: ступень ${fellPipeline} сошла`)
         }
         if (st.kind === 'ready') {
           const r = st as unknown as { pipeline?: string }
@@ -348,7 +423,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
            * `down`, взрослый не успевал прочесть ни разу. Оно сменяется тем,
            * что есть на самом деле: на чём игра в итоге работает.
            */
-          screenRun.alarm(
+          alarm(
             fellPipeline === null
               ? null
               : `Распознавание просело: работает ${r.pipeline ?? 'запасная ступень'}`,
@@ -366,7 +441,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
         // камера осталась бы занятой при погашенном экране.
         if (stopped || screen !== 'run') void stop()
       },
-      () => screenRun.alarm('Источник позы не запустился'),
+      () => alarm('Источник позы не запустился'),
     )
 
     const theLoop = makeLoop({
@@ -489,7 +564,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     root.replaceChildren(
       serviceScreen({
         settings,
-        info: { ...serviceInfo(), latency },
+        info: { ...serviceInfo(), latency, latencyFailed },
         debug,
         onDebug: (patch) => Object.assign(debug, patch),
         onBack: () => go('menu'),
@@ -499,10 +574,23 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
          * отличить её от сломанной нечем, консоли на штативе нет.
          */
         onMeasureLatency: () => {
-          void (deps.measureLatency ?? (() => Promise.resolve(null)))().then((r) => {
-            latency = r
-            draw()
-          })
+          void (deps.measureLatency ?? (() => Promise.resolve(null)))().then(
+            (r) => {
+              latency = r
+              latencyFailed = null
+              draw()
+            },
+            /*
+             * Отказ замера — штатный исход, а не поломка: телевизор приглушён,
+             * микрофон без разрешения, выстрелы разбежались. Необработанное
+             * обещание молчало бы, а молчание здесь неотличимо от «не мерили».
+             */
+            (e: unknown) => {
+              latency = null
+              latencyFailed = e instanceof Error ? e.message : String(e)
+              draw()
+            },
+          )
         },
         onShareLog: () => void (deps.saveLog ?? (() => Promise.resolve()))().then(draw),
         onClearLog: () => void (deps.clearLog ?? (() => Promise.resolve()))().then(draw),

@@ -35,12 +35,37 @@ export const OPTIONS = Object.freeze({
   previewMs: Object.freeze([1500, 2000, 2500, 3000] as const),
   wallMs: Object.freeze([1500, 2000, 2500, 3000] as const),
   verdictMs: Object.freeze([500, 800, 1200] as const),
-  latencyMs: Object.freeze([0, 150, 250, 400] as const),
+  /*
+   * Ступени сдвига на задержку трансляции доходят до 1200 мс, и верхние три
+   * добавлены замером, а не осторожностью: живой замер 22.10.2026 дал медиану
+   * 1166 мс — Miracast в неигровом режиме отдаёт около секунды. Перечень,
+   * упиравшийся в 400, не позволял выставить измеренное вовсе, и забег уходил
+   * со прежними 250 мс при замере впятеро больше.
+   * → `docs/audio-and-latency.md`
+   */
+  latencyMs: Object.freeze([0, 150, 250, 400, 600, 900, 1200] as const),
   strictness: Object.freeze(['soft', 'normal', 'strict'] as const),
   silhouette: Object.freeze([false, true] as const),
   cameraPreview: Object.freeze(['on', 'field', 'off'] as const),
   volume: Object.freeze([0, 0.25, 0.5, 0.75, 1] as const),
 })
+
+/**
+ * Ближайшая ступень сдвига к замеренному числу.
+ *
+ * Замер отдаёт произвольные миллисекунды, а настройка живёт ступенями, и без
+ * этого перевода замер оставался числом на служебном экране: в живом забеге
+ * 22.10.2026 замер дал 1166 мс, а `run.start` ушёл с прежними `latencyMs:
+ * 250`. Выше всего перечня берётся верхняя ступень, а не отказ — сдвиг обязан
+ * быть каким-то, и ближайший известный честнее прежнего.
+ */
+export function nearestLatencyMs(ms: number): SettingsShape['latencyMs'] {
+  let best: SettingsShape['latencyMs'] = OPTIONS.latencyMs[0]
+  for (const step of OPTIONS.latencyMs) {
+    if (Math.abs(step - ms) < Math.abs(best - ms)) best = step
+  }
+  return best
+}
 
 /**
  * Такт по ступени — ЗНАЧЕНИЕ ПО УМОЛЧАНИЮ, которое взрослый вправе перебить.

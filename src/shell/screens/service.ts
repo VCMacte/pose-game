@@ -9,6 +9,7 @@
  */
 
 import { button, choice, el, group } from '../dom'
+import { nearestLatencyMs } from '../../adapters/settings'
 import type { Settings } from '../../adapters/settings'
 
 export type ServiceInfo = {
@@ -16,6 +17,12 @@ export type ServiceInfo = {
   log: { sessions: number; events: number; bytes: number; broken: boolean }
   /** Последний замер задержки, если он был. */
   latency: { medianMs: number; spreadMs: number } | null
+  /**
+   * Чем кончился последний замер, если он ОТКАЗАЛ: телевизор приглушён,
+   * микрофон без разрешения, выстрелы разбежались. Молчание здесь неотличимо
+   * от «не мерили», а второго источника правды у взрослого на штативе нет.
+   */
+  latencyFailed?: string | null
   build: { version: string; date: string; modelCached: boolean }
 }
 
@@ -70,7 +77,9 @@ export function serviceScreen(o: ServiceOpts): HTMLElement {
       el('div', {
         text: i.latency
           ? `Измерено: ${i.latency.medianMs} мс, разброс ${i.latency.spreadMs} мс`
-          : 'Ещё не мерили',
+          : i.latencyFailed
+            ? `Замер не удался: ${i.latencyFailed}`
+            : 'Ещё не мерили',
       }),
       button('ИЗМЕРИТЬ ЗАДЕРЖКУ', o.onMeasureLatency, { 'data-test': 'measure-latency' }),
       /*
@@ -78,8 +87,16 @@ export function serviceScreen(o: ServiceOpts): HTMLElement {
        * задержка ЗВУКА, и видеопуть совпадает с ней только пока телевизор
        * держит A/V-синхронизацию. Поэтому сдвиг остаётся ручным, в настройках
        * забега, и подставляется сюда подсказкой, а не присваиванием.
+       *
+       * Но подсказка НАЗЫВАЕТ ступень, а не оставляет перевод взрослому:
+       * замер отдаёт произвольные миллисекунды, настройка живёт ступенями, и
+       * «1166 мс» само по себе не говорит, какую из них выбрать.
        */
-      el('small', { text: 'Сдвиг на задержку настраивается вручную в настройках забега' }),
+      el('small', {
+        text: i.latency
+          ? `Ближайшая ступень сдвига — ${nearestLatencyMs(i.latency.medianMs)} мс; выставить её в настройках забега`
+          : 'Сдвиг на задержку настраивается вручную в настройках забега',
+      }),
     ]),
 
     group('Версия', [

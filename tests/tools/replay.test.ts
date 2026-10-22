@@ -203,6 +203,89 @@ describe('replay', () => {
     expect(r.unreplayable).toBe(1)
   })
 
+  test('строки ЕСТЬ у соседнего раунда, а у этого нет — он тоже не пересчитывается', () => {
+    /*
+     * Дефект из разбора журнала 22.10.2026: нехватка строк проверялась по ВСЕЙ
+     * сессии, а не по окну раунда. Всплески идут только на интересных
+     * моментах, так что в сессии строки есть почти всегда, — и зачтённые
+     * раунды, у которых своих строк нет, пересчитывались по ПУСТОМУ окну,
+     * давали `skip (0/0)` и попадали в расхождения. Четыре из восьми
+     * «расхождений» того журнала были именно этим, а счётчик «без строк
+     * скелета» показывал ноль.
+     */
+    const first = 2000
+    const second = 6000
+    const d = dumpOf({
+      pose: POSE,
+      lines: framesInPose(POSE, second),
+      contactT: second,
+      judge: { matched: 7, frames: 7, valid: 7, ratio: 1, score: 3, total: 3 },
+    })
+    // Раунд ПЕРЕД тем, у которого строки: своих строк у него нет вовсе.
+    const log = d.sessions[0].log
+    const head = log.findIndex((e) => e.type === 'round.preview')
+    log.splice(
+      head,
+      0,
+      {
+        t: 10,
+        type: 'round.preview',
+        poseId: POSE.id,
+        mirror: POSE.mirror,
+        orientation: POSE.orientation,
+        requires: POSE.requires,
+        tier: POSE.tier,
+      },
+      { t: first, type: 'round.wall', travelMs: 2000, latencyShiftMs: 0 },
+      {
+        t: first + 10,
+        type: 'round.judge',
+        poseId: POSE.id,
+        matched: 7,
+        frames: 7,
+        valid: 7,
+        ratio: 1,
+        score: 3,
+        total: 3,
+      },
+    )
+
+    const r = replay(d)
+    expect(r.rounds.length).toBe(2)
+    expect(r.rounds[0].replayed).toBeNull()
+    expect(r.rounds[0].why).toBe('no-lines')
+    expect(r.unreplayable).toBe(1)
+    expect(r.mismatches).toBe(0)
+  })
+
+  test('судит по отношению сторон ТОГО раунда, а не только калибровочному', () => {
+    /*
+     * Живой забег 22.10.2026 судил на 0.5625 (камера отдала вертикальный кадр
+     * 360×640), а в калибровке осталось 1.7778. Replay брал калибровочное на
+     * все раунды и потому выносил СВОИ приговоры — расхождения оказывались
+     * артефактом инструмента, а не находкой. Поэтому забег пишет отношение
+     * сторон в приговор, а replay берёт записанное.
+     *
+     * Видно это по приговору: тот же скелет при другом отношении сторон даёт
+     * другие углы и другую ориентацию, то есть другой исход. Запись в журнале
+     * и есть единственный способ узнать, каким числом судили.
+     */
+    const contactT = 2000
+    const lines = framesInPose(POSE, contactT)
+    const judge = { matched: lines.length, frames: lines.length, valid: lines.length, ratio: 1, score: 3, total: 3 }
+
+    // Поля `aspect` нет — замена на калибровочное, и это зачтённый раунд.
+    const byCal = replay(dumpOf({ pose: POSE, lines, contactT, judge }))
+    expect(byCal.rounds[0].replayed!.kind).toBe('hit')
+
+    // Поле есть и говорит «кадр был вертикальный» — судить обязано по нему.
+    const d = dumpOf({ pose: POSE, lines, contactT, judge })
+    const row = d.sessions[0].log.find((e) => e.type === 'round.judge')!
+    ;(row as Record<string, unknown>).aspect = 0.5625
+    const byRound = replay(d)
+    expect(byRound.rounds[0].replayed!.kind).not.toBe('hit')
+  })
+
   test('нет калибровки в дампе — отказ, а не судейство по выдуманной', () => {
     // Без калибровки геометрия судится не тем масштабом, и расхождения были бы
     // артефактом инструмента, а не находкой.

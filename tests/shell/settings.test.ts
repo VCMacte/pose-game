@@ -10,7 +10,7 @@
  */
 import { beforeEach, describe, expect, test } from 'vitest'
 
-import { OPTIONS, makeSettings, timingsFor, toggleBlocked } from '../../src/adapters/settings'
+import { OPTIONS, makeSettings, nearestLatencyMs, timingsFor, toggleBlocked } from '../../src/adapters/settings'
 import { cutouts } from '../../src/core/poses'
 
 /** Хранилище в памяти: то же поведение, что у `localStorage`, без браузера. */
@@ -54,7 +54,13 @@ describe('перечень значений', () => {
     expect(OPTIONS.previewMs).toEqual([1500, 2000, 2500, 3000])
     expect(OPTIONS.wallMs).toEqual([1500, 2000, 2500, 3000])
     expect(OPTIONS.verdictMs).toEqual([500, 800, 1200])
-    expect(OPTIONS.latencyMs).toEqual([0, 150, 250, 400])
+    /*
+     * Ступени сдвига доходят до 1200 мс, и верхние три — не запас «на всякий
+     * случай». Живой замер 22.10.2026 дал медиану 1166 мс: Miracast в
+     * неигровом режиме отдаёт около секунды, а перечень, упиравшийся в 400,
+     * не позволял выставить измеренное вовсе.
+     */
+    expect(OPTIONS.latencyMs).toEqual([0, 150, 250, 400, 600, 900, 1200])
     expect(OPTIONS.strictness).toEqual(['soft', 'normal', 'strict'])
     expect(OPTIONS.cameraPreview).toEqual(['on', 'field', 'off'])
   })
@@ -67,6 +73,18 @@ describe('перечень значений', () => {
     expect(keys).not.toContain('voteRatio')
     expect(keys).not.toContain('windowMs')
     expect(keys).not.toContain('minValid')
+  })
+
+  test('замеренная задержка кладётся на БЛИЖАЙШУЮ ступень', () => {
+    /*
+     * Иначе замер остаётся числом на служебном экране, а судит игра по
+     * прежней настройке: в живом забеге 22.10.2026 замер дал 1166 мс, а
+     * `run.start` ушёл с `latencyMs: 250`.
+     */
+    expect(nearestLatencyMs(1166)).toBe(1200)
+    expect(nearestLatencyMs(230)).toBe(250)
+    // Выше всего перечня — верхняя ступень, а не отказ: сдвиг обязан быть.
+    expect(nearestLatencyMs(5000)).toBe(1200)
   })
 
   test('перечень заморожен: подправить его на ходу нельзя', () => {

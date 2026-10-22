@@ -56,8 +56,15 @@ export type PlayDeps = {
   rnd: () => number
   /** Часы СТЕНЫ — только для `takenAtMs` калибровки, переживающего перезапуск. */
   wall?: () => number
-  /** Опознание камеры, чтобы калибровка знала, на какой она снята. */
-  cameraId?: string
+  /**
+   * Опознание камеры, чтобы калибровка знала, на какой она снята.
+   *
+   * ФУНКЦИЯ, а не строка: камера открывается позже старта забега, и значением
+   * сюда приходило бы «её ещё нет». В журнале живого забега 22.10.2026 так и
+   * вышло — `cameraId: 'unknown'` при живой камере с честным `deviceId`, и
+   * половина `isStale()` не работала ни разу.
+   */
+  cameraId?: () => string | null
   /**
    * Откуда кадры. **Обязателен, а не по умолчанию `camera`:** журнал —
    * единственный вход калибровки порогов, и синтетический забег, записанный
@@ -127,7 +134,8 @@ const scoreOf = (kind: 'hit' | 'miss' | 'skip'): number =>
 export function makePlay(deps: PlayDeps): Play {
   const { settings, write, rnd } = deps
   const wall = deps.wall ?? ((): number => Date.now())
-  const cameraId = deps.cameraId ?? 'unknown'
+  /** Спрашивается в момент съёма и проверки — см. `PlayDeps.cameraId`. */
+  const cameraId = (): string => deps.cameraId?.() ?? 'unknown'
 
   let cal: Calibration | null = deps.cal ?? null
   let calibrator: Calibrator | null = null
@@ -141,6 +149,13 @@ export function makePlay(deps: PlayDeps): Play {
   let previewedAt: number | null = null
   /** Записанная причина паузы: иначе строка пишется на каждый кадр. */
   let pausedWhy: string | null = null
+  /**
+   * Отношение сторон, которым судили последние кадры. Идёт в приговор: журнал
+   * обязан нести число, ПО КОТОРОМУ судили, — иначе replay пересчитывает
+   * калибровочным и выдаёт свои приговоры за расхождения.
+   * → `RoundJudgeData.aspect`
+   */
+  let judgedAspect = 0
   let finished = false
 
   /** Мотив исхода. `skip` звучит НЕ как провал — тот же инвариант, что у цвета. */
@@ -160,7 +175,7 @@ export function makePlay(deps: PlayDeps): Play {
   /** Калибровка годна, если она есть и не устарела для нынешней камеры. */
   function usable(aspect: number): boolean {
     if (!cal) return false
-    return !isStale(cal, wall(), aspect, cameraId)
+    return !isStale(cal, wall(), aspect, cameraId())
   }
 
   /**
@@ -231,7 +246,7 @@ export function makePlay(deps: PlayDeps): Play {
    * опрашивается дальше.
    */
   function calibrate(t: number, frames: Frame[], aspect: number): void {
-    calibrator ??= makeCalibrator(aspect, cameraId)
+    calibrator ??= makeCalibrator(aspect, cameraId())
 
     for (const f of frames) {
       const g = geometry(f.lm, aspect)
@@ -242,7 +257,7 @@ export function makePlay(deps: PlayDeps): Play {
     if ('need' in got) {
       if (got.need === 'steady') {
         // Шевелился: этот экземпляр уже не отдаст калибровку никогда.
-        calibrator = makeCalibrator(aspect, cameraId)
+        calibrator = makeCalibrator(aspect, cameraId())
         hint = 'Постой спокойно ещё немного'
         write(calibNeed({ need: 'steady' }))
       }
@@ -306,6 +321,8 @@ export function makePlay(deps: PlayDeps): Play {
           frames: o.verdict.frames,
           valid: o.verdict.valid,
           ratio: o.verdict.ratio,
+          // То самое число, которым судили: см. `RoundJudgeData.aspect`.
+          aspect: judgedAspect,
           perAxis: o.verdict.perAxis,
           score: scoreOf(o.kind),
           total: st.score,
@@ -381,6 +398,9 @@ export function makePlay(deps: PlayDeps): Play {
        * через кадр, ведь `step` проходит здесь ~50 раз в секунду.
        */
       if (hint === SEARCHING_HINT) hint = CALIBRATION_HINT
+
+      // Число, которым судили эти кадры: уходит в приговор вместе с ним.
+      judgedAspect = aspect
 
       if (!run) {
         if (usable(aspect)) startRun(t)

@@ -194,14 +194,42 @@ function replaySession(log: Row[], out: ReplayResult): void {
       continue
     }
 
-    round.replayed = judgeWindow({
+    /*
+     * Отношение сторон берётся ТОГО РАУНДА, а калибровочное — только запасным
+     * вариантом. Живой забег 22.10.2026 судил на 0.5625 (камера отдала
+     * вертикальный кадр 360×640), а в калибровке осталось 1.7778: судейство по
+     * калибровочному числу давало СВОИ приговоры, и расхождения выходили
+     * артефактом инструмента, а не находкой.
+     */
+    const aspect = typeof e.aspect === 'number' && e.aspect > 0 ? e.aspect : cal!.aspect
+
+    const verdict = judgeWindow({
       spec: pose!,
-      frames: checkedFrames(lines, pose!, cal!),
+      frames: checkedFrames(lines, pose!, cal!, aspect),
       contactT: contact,
       latencyMs,
       cal: cal!,
       strict: strictOf(log),
     })
+
+    /*
+     * В ОКНО раунда не попало ни одной строки — пересчитывать нечем, и это
+     * НЕ расхождение. Прежде нехватка строк проверялась по всей сессии, а
+     * всплески идут только на интересных моментах: строки в сессии есть почти
+     * всегда, так что зачтённые раунды судились по пустому окну, давали
+     * `skip (0/0)` и попадали в расхождения. В журнале 22.10.2026 так вышло у
+     * четырёх раундов из восьми «разошедшихся», при счётчике «без строк
+     * скелета: 0».
+     */
+    if (verdict.frames === 0) {
+      round.why = 'no-lines'
+      out.unreplayable++
+      out.rounds.push(round)
+      contactT = null
+      continue
+    }
+
+    round.replayed = verdict
     round.match = round.replayed.kind === recorded.kind
     if (!round.match) out.mismatches++
     out.rounds.push(round)
@@ -212,8 +240,8 @@ function replaySession(log: Row[], out: ReplayResult): void {
 /**
  * Почему раунд не пересчитать.
  *
- * Нет строк скелета — НЕ расхождение: всплески ограничены бюджетом забега, у
- * большинства раундов строк нет вовсе, и считать это регрессией значило бы
+ * Нет строк скелета ВО ВСЕЙ СЕССИИ — НЕ расхождение: всплески ограничены
+ * бюджетом забега, у большинства раундов строк нет вовсе, и считать это регрессией значило бы
  * тонуть в ложной тревоге. Нет калибровки — тоже отказ, а не судейство по
  * выдуманной: не тот масштаб даёт расхождения, которые будут артефактом
  * инструмента, а не находкой.
@@ -240,11 +268,12 @@ function checkedFrames(
   lines: Array<{ t: number; lm: Float32Array }>,
   pose: PoseSpec,
   cal: Calibration,
+  aspect: number,
 ): CheckedFrame[] {
   const st = newPresenceState()
   const out: CheckedFrame[] = []
   for (const { t, lm } of lines) {
-    const gm = geometry(lm, cal.aspect)
+    const gm = geometry(lm, aspect)
     const r = presence(gm, t, st, pose.orientation)
     out.push(r.ok ? { t, lm, ...r } : { t, ...r })
   }
