@@ -45,6 +45,13 @@ function app(over: Parameters<typeof startApp>[1] = {}) {
     // Источник позы подменён ВСЕГДА: по умолчанию он динамически грузит
     // семнадцать мегабайт вендора MediaPipe, которых в node нет и быть не должно.
     startPose: async () => async () => {},
+    /*
+     * Замок ориентации — тоже всегда: `screen.orientation` в node нет, и
+     * настоящий замок отказал бы, добавив на экран просьбу повернуть телефон
+     * во все тесты разом. Его собственное поведение проверяется в
+     * `tests/shell/orientation.test.ts`.
+     */
+    lockOrientation: async () => ({ locked: true }),
     ...over,
   })
 }

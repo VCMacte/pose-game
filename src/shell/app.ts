@@ -18,6 +18,8 @@ import { createRenderer } from '../adapters/render/canvas'
 import type { Renderer } from '../adapters/render/canvas'
 import { dropCaches } from '../adapters/sw'
 import { frameAspect } from '../adapters/camera'
+import { browserOrientation, lockOrientation as lockScreenOrientation } from '../adapters/orientation'
+import type { LockResult } from '../adapters/orientation'
 import type { AspectSource } from '../adapters/camera'
 import { alarm as alarmEvent } from '../adapters/log/events'
 import { write as journalWrite } from '../adapters/log/store'
@@ -60,6 +62,12 @@ export type AppDeps = {
   rnd?: () => number
   /** Замер задержки тракта — кнопка служебного экрана. */
   measureLatency?: () => Promise<{ medianMs: number; spreadMs: number } | null>
+  /**
+   * Закрепление ориентации экрана. Приходит зависимостью: `screen.orientation`
+   * в node нет, а проверяется именно поведение при ОТКАЗЕ — на iOS замка нет
+   * вовсе, и игра обязана играться и там.
+   */
+  lockOrientation?: (want: 'portrait' | 'landscape') => Promise<LockResult>
   /** Выгрузка и очистка журнала — кнопки служебного экрана. */
   saveLog?: () => Promise<void>
   clearLog?: () => Promise<void>
@@ -166,6 +174,10 @@ export type App = {
  * оболочки. Без неё страницей до конца её жизни продолжает управлять прежний
  * worker, и кнопка выглядела бы не сработавшей.
  */
+/** Замок ориентации по умолчанию — браузерный, см. `adapters/orientation.ts`. */
+const defaultLock = (want: 'portrait' | 'landscape'): Promise<LockResult> =>
+  lockScreenOrientation(want, browserOrientation())
+
 async function defaultRefreshCache(): Promise<void> {
   await dropCaches()
   location.reload()
@@ -211,6 +223,49 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   const aspectSource: AspectSource = {}
   /** Опознание камеры нынешнего забега. `null` — она ещё не назвалась. */
   let cameraId: string | null = null
+
+  /**
+   * Тревога идёт НА ЭКРАН И В ЖУРНАЛ одной дорогой.
+   *
+   * Консоли на штативе нет, экран живёт ровно столько, сколько на него
+   * смотрят, и тревога, не попавшая в журнал, для разбора не существует: в
+   * живом забеге 22.10.2026 вертикальный кадр камеры был виден на экране, а в
+   * журнале его нет — и установить, показалось ли предупреждение, оказалось
+   * нечем.
+   *
+   * Запись по СМЕНЕ текста: кадры идут пятьдесят раз в секунду, и повтор одной
+   * и той же строки вытеснил бы из журнала сам забег. Снятая тревога (`null`)
+   * забывается — та же строка через минуту снова новость. Забег сбрасывает
+   * память о тревогах в `startFrames`.
+   *
+   * Живёт на уровне приложения, а не забега: о неудавшемся замке ориентации
+   * надо сказать на переходе экранов, когда экрана забега ещё нет. Экран
+   * получит текст, если он есть (`rs`), а журнал — всегда.
+   * → `docs/log-and-storage.md`
+   */
+  /**
+   * Просьба повернуть телефон НЕ перебивает уже показанную тревогу.
+   *
+   * Замок ориентации отвечает микрозадачей позже перехода экрана, то есть
+   * позже, чем успевает сказать своё источник позы, — и «Поверни телефон»
+   * затирало «Камеры нет». Из двух это менее срочное: боком игра всё-таки
+   * играется, без камеры — нет.
+   */
+  const askToRotate = (): void => {
+    if (alarmed === null) alarm('Поверни телефон горизонтально')
+  }
+
+  let alarmed: string | null = null
+  const alarm = (text: string | null): void => {
+    rs?.alarm(text)
+    if (text === null) {
+      alarmed = null
+      return
+    }
+    if (text === alarmed) return
+    alarmed = text
+    ;(deps.write ?? journalWrite)(alarmEvent({ text }))
+  }
   /** Ступень, которая сошла, либо `null`. Переживает `ready`: см. `onStatus`. */
   let fellPipeline: string | null = null
   const debug: Debug & { rawAlways?: boolean } = { source: 'камера', pipeline: 'авто' }
@@ -326,17 +381,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
      * (`null`) забывается — та же строка через минуту снова новость.
      * → `docs/log-and-storage.md`
      */
-    let alarmed: string | null = null
-    const alarm = (text: string | null): void => {
-      screenRun.alarm(text)
-      if (text === null) {
-        alarmed = null
-        return
-      }
-      if (text === alarmed) return
-      alarmed = text
-      ;(deps.write ?? journalWrite)(alarmEvent({ text }))
-    }
+    alarmed = null
 
     let renderer: Renderer | null = null
     try {
@@ -617,6 +662,31 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     }
     screen = next
     draw()
+
+    /*
+     * Ориентация ЗАКРЕПЛЯЕТСЯ, а не объявляется: забег уходит на телевизор
+     * 16:9, меню ребёнок читает с телефона в руках. Прежде `orientation()`
+     * только отвечал на вопрос, и потребителя у ответа не было — телефон
+     * стоял как поставили, и в живом прогоне 22.10.2026 это был портрет.
+     *
+     * Просьба идёт на КАЖДОМ переходе, и это не расточительство: замок
+     * требует жеста, а переход экрана и есть нажатие ребёнка.
+     */
+    const want = next === 'run' ? 'landscape' : 'portrait'
+    void (deps.lockOrientation ?? defaultLock)(want).then(
+      (r) => {
+        /*
+         * Не закрепилось на забеге — просим повернуть руками. Молча играть
+         * боком нельзя: на телевизоре это картинка в две полосы, и ребёнок не
+         * поймёт, почему. На меню молчим: портрет там удобство, а не условие.
+         */
+        if (!r.locked && next === 'run') askToRotate()
+      },
+      // Отказ самого обещания — тот же случай, что `locked: false`.
+      () => {
+        if (next === 'run') askToRotate()
+      },
+    )
   }
 
   draw()
