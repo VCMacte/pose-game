@@ -30,6 +30,7 @@ import {
 } from '../log/events'
 import type { PipelineDownWhy } from '../log/events'
 import { write } from '../log/store'
+import { withTimeout } from '../promise'
 import { POSE, landmarkerOptions, looksLikeCpu, makeClock, packLandmarks, warmup } from './pack'
 import type { Delegate, Landmarker } from './pack'
 import {
@@ -137,22 +138,11 @@ export type Stop = () => Promise<void>
 
 // ───────────────────────── вспомогательное ─────────────────────────
 
-/** Обещание с потолком ожидания: молчащая попытка не вправе держать игру. */
-function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error(`${what}: нет ответа за ${ms} мс`)), ms)
-    p.then(
-      (v) => {
-        clearTimeout(timer)
-        resolve(v)
-      },
-      (e) => {
-        clearTimeout(timer)
-        reject(e)
-      },
-    )
-  })
-}
+/*
+ * Потолок ожидания (`withTimeout`) живёт в `../promise.ts`: тот же сторож
+ * нужен привилегированным обещаниям браузера, а две копии однажды разойдутся
+ * числами.
+ */
 
 const says = (e: unknown): string => {
   const x = e as { message?: string } | null

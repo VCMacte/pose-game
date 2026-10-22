@@ -9,6 +9,8 @@
  *
  * Разбор: `docs/render-and-layout.md`.
  */
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { beforeEach, describe, expect, test } from 'vitest'
 
 import { startApp } from '../../src/shell/app'
@@ -85,21 +87,39 @@ describe('ориентация экранов', () => {
     expect(asked[asked.length - 1]).toBe('portrait')
   })
 
-  test('не закрепилось — ПРОСИТ повернуть телефон и пишет это в журнал', async () => {
+  test('отказ замка НЕ пишет тревогу: о повороте говорит CSS, а не рапорт', () => {
     /*
-     * На iOS замка нет вовсе, во вкладке без жеста он тоже не проходит. Молча
-     * играть боком нельзя: картинка уходит на телевизор 16:9, и ребёнок увидит
-     * игру в две полосы, не понимая, почему.
+     * Урок `run-game`: подсказка про поворот живёт на CSS, по
+     * `@media (orientation: portrait)`, и от успеха замка НЕ зависит. Замок
+     * способен отрапортовать успех на всё ещё портретном экране и отказать
+     * на уже горизонтальном — тревога по его ответу врала бы в обе стороны.
+     */
+    const html = readFileSync(join(__dirname, '..', '..', 'index.html'), 'utf8')
+    // Правило показа привязано к ОРИЕНТАЦИИ экрана, а не к классу, который
+    // ставил бы код: иначе ответ замка всё равно решал бы, видно ли подсказку.
+    expect(html).toMatch(/@media\s*\(orientation:\s*portrait\)[\s\S]{0,200}\.rotate/)
+
+    // А сама подсказка на экране забега есть всегда — её прячет только стиль.
+    const a = app()
+    a.go('run')
+    expect(root.querySelector('[data-test="rotate"]')).not.toBeNull()
+  })
+
+  test('уход страницы из видимости пишется в журнал', async () => {
+    /*
+     * Страница уходит в `hidden` не только от сна экрана: в `run-game` это
+     * сделал БУДИЛЬНИК — и вместе с видимостью сорвался полный экран и
+     * повернулся кадр. Без записи такой эпизод в выгрузке неотличим от
+     * необъяснимой паузы.
      */
     const wrote: Array<Record<string, unknown>> = []
-    const a = app({
-      write: (e) => void wrote.push({ type: e.type, ...e.data }),
-      lockOrientation: async () => ({ locked: false, why: 'замок не разрешён' }),
-    })
+    const a = app({ write: (e) => void wrote.push({ type: e.type, ...e.data }) })
     a.go('run')
+    document.dispatchEvent(new Event('visibilitychange'))
     await settle()
 
-    expect(root.textContent).toMatch(/поверни телефон/i)
-    expect(wrote.some((e) => e.type === 'alarm' && /поверни телефон/i.test(String(e.text)))).toBe(true)
+    const seen = wrote.find((e) => e.type === 'visibility')
+    expect(seen).toBeDefined()
+    expect(seen!.state).toBe('visible')
   })
 })

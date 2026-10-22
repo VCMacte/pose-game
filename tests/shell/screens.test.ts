@@ -811,18 +811,27 @@ describe('вертикальный кадр камеры назван вслух
     }
   }
 
+  /*
+   * Читается АВАРИЙНАЯ СТРОКА, а не весь текст экрана: на экране забега с
+   * недавних пор постоянно лежит просьба повернуть телефон, которую
+   * показывает и скрывает один только CSS (`@media (orientation: portrait)`).
+   * В node раскладки нет, так что в `textContent` она попадает всегда, и
+   * проверка по всему тексту стала бы проверкой самой себя.
+   */
+  const alarmText = (): string => byTest('alarm')?.textContent ?? ''
+
   test('кадр 360×640 — предупреждение повернуть телефон', async () => {
     const { feed } = runWithFrame(360, 640)
     await feed()
 
-    expect(text()).toMatch(/вертикальн|поверни/i)
+    expect(alarmText()).toMatch(/вертикальн/i)
   })
 
   test('кадр 640×360 — ничего лишнего не говорится', async () => {
     const { feed } = runWithFrame(640, 360)
     await feed()
 
-    expect(text()).not.toMatch(/вертикальн|поверни/i)
+    expect(alarmText()).not.toMatch(/вертикальн|поверни/i)
   })
 })
 

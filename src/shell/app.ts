@@ -18,10 +18,10 @@ import { createRenderer } from '../adapters/render/canvas'
 import type { Renderer } from '../adapters/render/canvas'
 import { dropCaches } from '../adapters/sw'
 import { frameAspect } from '../adapters/camera'
-import { browserOrientation, lockOrientation as lockScreenOrientation } from '../adapters/orientation'
+import { ORIENTATION, browserOrientation, lockOrientation as lockScreenOrientation } from '../adapters/orientation'
 import type { LockResult } from '../adapters/orientation'
 import type { AspectSource } from '../adapters/camera'
-import { alarm as alarmEvent } from '../adapters/log/events'
+import { alarm as alarmEvent, visibility as visibilityEvent } from '../adapters/log/events'
 import { write as journalWrite } from '../adapters/log/store'
 import type { LogEvent } from '../adapters/log/store'
 import { makeSettings, timingsFor, toggleBlocked } from '../adapters/settings'
@@ -243,18 +243,6 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
    * получит текст, если он есть (`rs`), а журнал — всегда.
    * → `docs/log-and-storage.md`
    */
-  /**
-   * Просьба повернуть телефон НЕ перебивает уже показанную тревогу.
-   *
-   * Замок ориентации отвечает микрозадачей позже перехода экрана, то есть
-   * позже, чем успевает сказать своё источник позы, — и «Поверни телефон»
-   * затирало «Камеры нет». Из двух это менее срочное: боком игра всё-таки
-   * играется, без камеры — нет.
-   */
-  const askToRotate = (): void => {
-    if (alarmed === null) alarm('Поверни телефон горизонтально')
-  }
-
   let alarmed: string | null = null
   const alarm = (text: string | null): void => {
     rs?.alarm(text)
@@ -672,22 +660,33 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
      * Просьба идёт на КАЖДОМ переходе, и это не расточительство: замок
      * требует жеста, а переход экрана и есть нажатие ребёнка.
      */
-    const want = next === 'run' ? 'landscape' : 'portrait'
-    void (deps.lockOrientation ?? defaultLock)(want).then(
-      (r) => {
-        /*
-         * Не закрепилось на забеге — просим повернуть руками. Молча играть
-         * боком нельзя: на телевизоре это картинка в две полосы, и ребёнок не
-         * поймёт, почему. На меню молчим: портрет там удобство, а не условие.
-         */
-        if (!r.locked && next === 'run') askToRotate()
-      },
-      // Отказ самого обещания — тот же случай, что `locked: false`.
-      () => {
-        if (next === 'run') askToRotate()
-      },
-    )
+    const want = ORIENTATION[next]
+    /*
+     * Исход замка НИКУДА не показывается, и это решение, а не упущение.
+     * Просьбу повернуть телефон показывает CSS по `@media (orientation:
+     * portrait)` — то есть по тому, что ЕСТЬ, а не по рапорту: замок умеет
+     * отрапортовать успех на всё ещё портретном экране и отказать на уже
+     * горизонтальном (урок `run-game`). Отказ не бросается: ждать его
+     * исхода некому.
+     */
+    void (deps.lockOrientation ?? defaultLock)(want).catch(() => {})
   }
+
+  /*
+   * Уход страницы из видимости — В ЖУРНАЛ.
+   *
+   * Страница уходит в `hidden` не только от сна экрана: в `run-game` это
+   * сделал БУДИЛЬНИК, и вместе с видимостью сорвался полный экран и
+   * повернулся кадр. Без записи такой эпизод в выгрузке неотличим от
+   * необъяснимой паузы, а череда перехватов — от «системе не понравилось».
+   * → `docs/log-and-storage.md`
+   */
+  const onVisibility = (): void => {
+    if (stopped) return
+    const state = typeof document === 'undefined' || document.visibilityState !== 'hidden' ? 'visible' : 'hidden'
+    ;(deps.write ?? journalWrite)(visibilityEvent({ state }))
+  }
+  if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
 
   draw()
 

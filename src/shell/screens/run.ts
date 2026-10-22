@@ -70,6 +70,14 @@ export function runScreen(o: RunScreenOpts): RunScreen {
   const canvas = el('canvas', { 'data-test': 'canvas' })
   const hint = el('div', { class: 'hint', 'data-test': 'hint' })
   const alarm = el('div', { class: 'alarm', 'data-test': 'alarm', hidden: true })
+  /*
+   * Просьба повернуть телефон: показывается и скрывается ТОЛЬКО стилем, по
+   * `@media (orientation: portrait)` в `index.html`. Ни одного обращения к
+   * ней из кода нет намеренно — замок ориентации рапортует успех и на всё
+   * ещё портретном экране, и подсказка по его ответу врала бы.
+   * → `docs/render-and-layout.md`
+   */
+  const rotate = el('div', { class: 'rotate', 'data-test': 'rotate', text: 'Поверни телефон горизонтально' })
 
   /*
    * Кнопка паузы — ЕДИНСТВЕННАЯ кнопка на экране забега, и она крупная: по ней
@@ -95,7 +103,7 @@ export function runScreen(o: RunScreenOpts): RunScreen {
     menuBtn,
   ])
 
-  const root = el('div', { class: 'screen run' }, [canvas, hint, alarm, pauseBtn, menu])
+  const root = el('div', { class: 'screen run screen-run' }, [canvas, hint, alarm, rotate, pauseBtn, menu])
 
   return {
     root,
