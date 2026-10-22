@@ -28,26 +28,18 @@ if (root) {
      * только здесь и только по нажатию кнопки.
      */
     measureLatency: async () => {
-      let mic: { close(): Promise<void> } | null = null
-      try {
-        const [{ measureLatency }, { micLoopback }] = await Promise.all([
-          import('./adapters/latency'),
-          import('./adapters/mic'),
-        ])
-        const loopback = await micLoopback()
-        mic = loopback
-        return await measureLatency({ loopback })
-      } catch {
-        /*
-         * Отказ замера — не повод ронять служебный экран: он и так про
-         * диагностику, а причина уже записана в журнал событием
-         * `latency.measured` с `ok: false`.
-         */
-        return null
-      } finally {
-        // Микрофон отпускается В ЛЮБОМ исходе: иначе индикатор горит дальше.
-        if (mic) await mic.close()
-      }
+      const [{ measurePipelineLatency }, { micLoopback }] = await Promise.all([
+        import('./adapters/latency'),
+        import('./adapters/mic'),
+      ])
+      /*
+       * Отказ НЕ глотается здесь, и это правка по проверке в браузере.
+       * Прежде он превращался в `null`, а служебный экран показывал «Ещё не
+       * мерили» — то есть врал о замере, который был и не удался. Отказ ловит
+       * оболочка и ПОКАЗЫВАЕТ его причину; уборка микрофона и запись в журнал
+       * живут внутри `measurePipelineLatency`.
+       */
+      return await measurePipelineLatency({ openMic: () => micLoopback() })
     },
 
     saveLog: async () => {

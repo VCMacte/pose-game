@@ -14,7 +14,14 @@
 import { describe, expect, test } from 'vitest'
 
 import { createAudio } from '../../src/adapters/audio'
-import { LATENCY, correlate, makeChirp, measureLatency } from '../../src/adapters/latency'
+import {
+  LATENCY,
+  correlate,
+  makeChirp,
+  measureLatency,
+  measurePipelineLatency,
+  seriesBudgetMs,
+} from '../../src/adapters/latency'
 
 const SR = 8000
 
@@ -199,6 +206,151 @@ describe('серия выстрелов', () => {
     const json = JSON.stringify(r)
     expect(json).not.toContain('Float32Array')
     expect(Object.keys(r).sort()).toEqual(['medianMs', 'shots', 'spreadMs'])
+  })
+})
+
+describe('замер целиком: микрофон, серия, уборка', () => {
+  /*
+   * Эта обёртка существует потому, что `src/main.ts` проверить нечем — это
+   * точка входа. Пока сборка замера жила там, она ГЛОТАЛА отказ и возвращала
+   * `null`: служебный экран показывал «Ещё не мерили» ровно там, где мерили и
+   * не услышали. Поймано проверкой в браузере, а не тестом, — поэтому логика
+   * и переехала сюда, где её видно.
+   */
+  const good = (delays: Array<number | null>) => {
+    let i = 0
+    let closed = 0
+    return {
+      closed: () => closed,
+      open: async () => ({
+        sampleRate: SR,
+        shoot: async (chirp: Float32Array): Promise<Float32Array> => {
+          const d = delays[i++]
+          return d === null ? new Float32Array(SR) : heardAt(chirp, d, SR, 0.3)
+        },
+        close: async () => {
+          closed++
+        },
+      }),
+    }
+  }
+
+  test('удавшийся замер отдаёт числа и отпускает микрофон', async () => {
+    const mic = good([100, 101, 100, 102])
+    const r = await measurePipelineLatency({ shots: 4, openMic: mic.open })
+    expect(r.medianMs).toBeLessThanOrEqual(104)
+    expect(mic.closed()).toBe(1)
+  })
+
+  test('ОТКАЗ замера доходит наружу, а не превращается в «не мерили»', async () => {
+    /*
+     * Отказ — штатный исход: телевизор приглушён, выстрелы разбежались. Молча
+     * вернуть `null` значит сказать взрослому «не мерили» о замере, который
+     * был и не удался, — то есть соврать ровно в диагностике.
+     */
+    const mic = good([null, null, null, null])
+    await expect(measurePipelineLatency({ shots: 4, openMic: mic.open })).rejects.toThrow(/замер не удался/)
+    // И микрофон всё равно отпущен: иначе индикатор горит дальше.
+    expect(mic.closed()).toBe(1)
+  })
+
+  test('срок серии ПОКРЫВАЕТ настоящую её длительность', () => {
+    /*
+     * Найдено код-ревью, и это был бы худший род сторожа: срок короче
+     * измеренной длительности отменял бы ИСПРАВНЫЙ замер. Двенадцать выстрелов
+     * в браузере заняли около сорока секунд — запись это лишь половина, вторая
+     * половина уходит в корреляцию (поиск по 1200 мс сдвига на каждом
+     * выстреле), а прежний запас считался от одной записи.
+     */
+    expect(seriesBudgetMs(LATENCY.shots)).toBeGreaterThan(60_000)
+    // И всё же ограниченный: сторож без потолка не сторож.
+    expect(seriesBudgetMs(LATENCY.shots)).toBeLessThan(5 * 60_000)
+  })
+
+  test('срок серии считается от ДВУХ выстрелов минимум', () => {
+    // `measureLatency` поднимает `shots: 1` до двух, и бюджет обязан считаться
+    // по тому же числу — иначе замер отказывает по сроку всегда.
+    expect(seriesBudgetMs(1)).toBe(seriesBudgetMs(2))
+  })
+
+  test('опоздавшее разрешение микрофона НЕ оставляет его включённым', async () => {
+    /*
+     * Найдено код-ревью. Срок отклоняет обещание, но `getUserMedia` не
+     * отменяет: взрослый жмёт «Разрешить» на двадцать пятой секунде, обещание
+     * исполняется — и дорожка живёт до закрытия страницы, а индикатор записи
+     * горит. Это ровно то, что doc-комментарий функции запрещает.
+     */
+    let closed = 0
+    const late = measurePipelineLatency({
+      shots: 2,
+      micMs: 20,
+      openMic: () =>
+        new Promise((resolve) =>
+          setTimeout(
+            () =>
+              resolve({
+                sampleRate: SR,
+                shoot: async () => new Float32Array(SR),
+                close: async () => {
+                  closed++
+                },
+              }),
+            60,
+          ),
+        ),
+    })
+    await expect(late).rejects.toThrow(/нет ответа/)
+    // Ждём, пока опоздавшее разрешение исполнится, и проверяем уборку.
+    await new Promise((r) => setTimeout(r, 120))
+    expect(closed).toBe(1)
+  })
+
+  test('зависший МИКРОФОН кончается сроком, а не висит вечно', async () => {
+    /*
+     * «Любое обещание разрешений может не завершиться никогда» — измеренное
+     * правило `run-game` (у них на это стоит `withTimeout`, микрофон и камера
+     * 20000 мс). Поймано проверкой в браузере: в headless-Chromium нажатие
+     * `ИЗМЕРИТЬ ЗАДЕРЖКУ` не давало НИ ОДНОГО исхода за полминуты, и служебный
+     * экран всё это время показывал «Ещё не мерили».
+     */
+    await expect(
+      measurePipelineLatency({
+        shots: 2,
+        micMs: 20,
+        openMic: () => new Promise(() => {}),
+      }),
+    ).rejects.toThrow(/нет ответа/)
+  })
+
+  test('зависшая СЕРИЯ кончается сроком, и микрофон отпускается', async () => {
+    // Второе место, где обещание способно повиснуть: сама петля. Запись идёт
+    // через устаревший `ScriptProcessor`, и молчащий узел ответа не даёт.
+    let closed = 0
+    await expect(
+      measurePipelineLatency({
+        shots: 2,
+        totalMs: 20,
+        openMic: async () => ({
+          sampleRate: SR,
+          shoot: () => new Promise<Float32Array>(() => {}),
+          close: async () => {
+            closed++
+          },
+        }),
+      }),
+    ).rejects.toThrow(/нет ответа/)
+    expect(closed).toBe(1)
+  })
+
+  test('микрофон не открылся — отказ тоже доходит наружу', async () => {
+    await expect(
+      measurePipelineLatency({
+        shots: 4,
+        openMic: async () => {
+          throw new Error('нет разрешения на микрофон')
+        },
+      }),
+    ).rejects.toThrow(/микрофон/)
   })
 })
 

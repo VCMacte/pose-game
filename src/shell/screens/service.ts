@@ -23,6 +23,12 @@ export type ServiceInfo = {
    * от «не мерили», а второго источника правды у взрослого на штативе нет.
    */
   latencyFailed?: string | null
+  /**
+   * Замер ИДЁТ прямо сейчас. Без этого «Ещё не мерили» означало три разных
+   * состояния сразу — не мерили, мерим, повисло, — а серия идёт секунд
+   * двадцать. Поймано проверкой в браузере.
+   */
+  latencyBusy?: boolean
   build: { version: string; date: string; modelCached: boolean }
 }
 
@@ -75,11 +81,13 @@ export function serviceScreen(o: ServiceOpts): HTMLElement {
 
     group('Задержка тракта', [
       el('div', {
-        text: i.latency
-          ? `Измерено: ${i.latency.medianMs} мс, разброс ${i.latency.spreadMs} мс`
-          : i.latencyFailed
-            ? `Замер не удался: ${i.latencyFailed}`
-            : 'Ещё не мерили',
+        text: i.latencyBusy
+          ? 'Мерю… тише, пожалуйста: игра слушает телевизор'
+          : i.latency
+            ? `Измерено: ${i.latency.medianMs} мс, разброс ${i.latency.spreadMs} мс`
+            : i.latencyFailed
+              ? `Замер не удался: ${i.latencyFailed}`
+              : 'Ещё не мерили',
       }),
       button('ИЗМЕРИТЬ ЗАДЕРЖКУ', o.onMeasureLatency, { 'data-test': 'measure-latency' }),
       /*

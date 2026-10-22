@@ -105,6 +105,51 @@ describe('ориентация экранов', () => {
     expect(root.querySelector('[data-test="rotate"]')).not.toBeNull()
   })
 
+  test('возврат видимости ЗАНОВО просит замок ориентации', async () => {
+    /*
+     * Измерено в `run-game` 14.10: будильник увёл страницу в `hidden`, и на
+     * возврате сорвался полный экран, а за ним повернулся кадр камеры в
+     * портрет — забег встал ложной паузой на 13.5 секунды. Полный экран они
+     * возвращают на каждом удобном событии, а ОРИЕНТАЦИЮ не возвращают вовсе:
+     * это их незакрытая дыра, и закрывается она здесь.
+     */
+    const asked: string[] = []
+    const a = app({
+      lockOrientation: async (w) => {
+        asked.push(w)
+        return { locked: true }
+      },
+    })
+    a.go('run')
+    await settle()
+    const afterGo = asked.length
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    await settle()
+
+    expect(asked.length).toBeGreaterThan(afterGo)
+    // Просится ориентация ТЕКУЩЕГО экрана, а не та, с которой уходили.
+    expect(asked[asked.length - 1]).toBe('landscape')
+  })
+
+  test('остановленное приложение видимость больше не слушает', async () => {
+    /*
+     * Слушатель висит на `document`, а приложений за сессию несколько (тесты,
+     * пересоздание). Не снятый, он пишет в журнал от имени уже погашенного
+     * приложения и держит его замыкание живым.
+     */
+    const wrote: Array<Record<string, unknown>> = []
+    const a = app({ write: (e) => void wrote.push({ type: e.type, ...e.data }) })
+    a.go('run')
+    a.stop()
+    const before = wrote.filter((e) => e.type === 'visibility').length
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    await settle()
+
+    expect(wrote.filter((e) => e.type === 'visibility').length).toBe(before)
+  })
+
   test('уход страницы из видимости пишется в журнал', async () => {
     /*
      * Страница уходит в `hidden` не только от сна экрана: в `run-game` это

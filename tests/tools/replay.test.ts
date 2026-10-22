@@ -7,9 +7,13 @@
  *
  * Разбор: `docs/log-and-storage.md`.
  */
-import { describe, expect, test } from 'vitest'
+import { rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { describe, expect, test, vi } from 'vitest'
 
 import { report } from '../../tools/lib/report'
+import { printReport } from '../../tools/lib/cli'
 import { replay } from '../../tools/lib/replay'
 import { CONFIG, strictness } from '../../src/core/config'
 import { geometry } from '../../src/core/geometry'
@@ -398,7 +402,7 @@ describe('сводка по журналу', () => {
   test('частота и задержки инференса берутся из health', () => {
     const r = report(runWith(['hit']))
     expect(r.health.fps).toBeGreaterThan(0)
-    expect(r.health.inferP50).toBe(18)
+    expect(r.health.inferMedian).toBe(18)
   })
 
   test('синтетический забег ПОМЕЧЕН в сводке', () => {
@@ -415,11 +419,220 @@ describe('сводка по журналу', () => {
     expect(r.hardestPose).toBeNull()
   })
 
+  test('склеенный повтор весит столько, сколько событий в нём', () => {
+    /*
+     * Журнал сворачивает одинаковые подряд события в одну запись со счётчиком
+     * `_n`: одна запись может означать до пятисот событий. Счёт по записям
+     * давал бы «пауза одна» там, где их было двести. У `run-game` на этом
+     * один журнал печатал несогласованные между собой числа: отбросы считались
+     * с весом, а окна — без.
+     */
+    const d = runWith(['hit'], [])
+    d.sessions[0].log.push({ t: 900, type: 'pause', why: 'lowvis', _n: 5 })
+    const r = report(d)
+    expect(r.pauses.lowvis).toBe(5)
+  })
+
+  test('инференс: p50 — медиана окон, p95 — ХУДШЕЕ окно', () => {
+    /*
+     * Урок `run-game`, записанный у них дословно: квантили в `health`
+     * посчитаны ВНУТРИ окна, и усреднять их нельзя — среднее квантилей не
+     * квантиль. Медиана девяноста пятых процентилей скрывает ровно то, ради
+     * чего p95 и смотрят: худшее окно забега.
+     */
+    const d = runWith(['hit'], [])
+    const log = d.sessions[0].log
+    const at = log.findIndex((e) => e.type === 'health')
+    log.splice(
+      at,
+      1,
+      { t: 800, type: 'health', fps: 40, inferP50: 20, inferP95: 44, drops: 0, valid: 10, lost: 0 },
+      { t: 801, type: 'health', fps: 38, inferP50: 22, inferP95: 300, drops: 0, valid: 10, lost: 0 },
+      { t: 802, type: 'health', fps: 39, inferP50: 18, inferP95: 40, drops: 0, valid: 10, lost: 0 },
+    )
+    const r = report(d)
+    expect(r.health.inferMedian).toBe(20)
+    expect(r.health.inferWorst).toBe(300)
+    expect(r.health.windows).toBe(3)
+  })
+
+  test('много окон не роняют сводку: ни переполнения стека, ни зависания', () => {
+    /*
+     * Найдено код-ревью, обе находки сразу. `Math.max(...массив)` на длинном
+     * массиве бросает `RangeError` — инструмент умирал бы на том самом
+     * журнале, который разбирают. А вес склейки `_n` приходит из ФАЙЛА, и
+     * запись с `_n: 1e9` заставила бы отчёт выделять память до отказа: стор
+     * свой потолок держит, но отчёт читает произвольный JSON.
+     */
+    const log: Array<Record<string, unknown>> = [
+      { t: 0, type: 'run.start', tier: 1, durationS: 60, strict: 1, latencyMs: 250, source: 'camera' },
+      { t: 1, type: 'health', fps: 50, inferP50: 20, inferP95: 44, drops: 1, valid: 10, lost: 0, _n: 1e9 },
+      { t: 2, type: 'health', fps: 50, inferP50: 20, inferP95: 300, drops: 1, valid: 10, lost: 0, _n: 400 },
+    ]
+    const r = report({ sessions: [{ id: 1, log }] })
+    expect(r.health.inferWorst).toBe(300)
+    // Вес обрезан потолком склейки, а не взят из файла как есть.
+    expect(r.health.windows).toBeLessThan(2000)
+  })
+
+  test('состояние «после финиша» НЕ перетекает в следующую сессию', () => {
+    /*
+     * Сессия — это один запуск приложения, и в файле их до двадцати. Если
+     * признак «забег кончился» не сбрасывать на границе сессий, то у всех
+     * следующих сессий пропадут окна калибровки — молча и тем вернее, чем
+     * аккуратнее взрослый доигрывал забеги до финиша.
+     */
+    const first = runWith(['hit'], []).sessions[0]
+    const second = {
+      id: 2,
+      log: [{ t: 1, type: 'health', fps: 55, inferP50: 70, inferP95: 90, drops: 0, valid: 5, lost: 0 }],
+    }
+    const r = report({ sessions: [first, second] })
+    expect(r.sessions).toBe(2)
+    expect(r.health.windows).toBe(2)
+  })
+
+  test('окна БЕЗ инференса не тянут медиану в ноль', () => {
+    /*
+     * Ноль в `inferP50` значит «инференса не было» — синтетический источник
+     * или ещё не заведшийся конвейер, — а не «инференс занял ноль
+     * миллисекунд». Ноль был бы ложью, тот же запрет, что у `measured` в
+     * осях. На живом журнале 22.10 это и вышло: синтетический забег дал свои
+     * окна с нулями, и сводка напечатала «медиана окон 0 мс» при живом
+     * инференсе около 70.
+     */
+    const d = runWith(['hit'], [])
+    const log = d.sessions[0].log
+    const at = log.findIndex((e) => e.type === 'health')
+    log.splice(
+      at,
+      1,
+      { t: 800, type: 'health', fps: 60, inferP50: 0, inferP95: 0, drops: 0, valid: 0, lost: 0 },
+      { t: 801, type: 'health', fps: 60, inferP50: 0, inferP95: 0, drops: 0, valid: 0, lost: 0 },
+      { t: 802, type: 'health', fps: 50, inferP50: 70, inferP95: 105, drops: 0, valid: 10, lost: 0 },
+    )
+    const r = report(d)
+    expect(r.health.inferMedian).toBe(70)
+    expect(r.health.inferWorst).toBe(105)
+    // Окна считаются ВСЕ: частота по ним честная, инференса в них просто нет.
+    expect(r.health.windows).toBe(3)
+  })
+
+  test('окна ДО забега считаются: это калибровка, и инференс в ней живой', () => {
+    /*
+     * `run.start` пишется ПОСЛЕ калибровки, так что окна калибровки лежат
+     * раньше него. Выбросить их значило бы ослепнуть ровно в том случае,
+     * который интереснее всего: калибровка не сдаётся, и надо знать, с какой
+     * частотой и каким инференсом она не сдавалась. Отрезается только простой
+     * ПОСЛЕ финиша — то, что измерено у `run-game`.
+     */
+    const d = runWith(['hit'], [])
+    d.sessions[0].log.unshift({ t: 1, type: 'health', fps: 55, inferP50: 70, inferP95: 90, drops: 0, valid: 5, lost: 0 })
+    const r = report(d)
+    expect(r.health.windows).toBe(2)
+  })
+
+  test('окна здоровья ПОСЛЕ финиша в числа забега не входят', () => {
+    /*
+     * Экран забега живёт и после финиша, инференс продолжается, и окна
+     * простоя втекают в числа забега. У `run-game` 355 секунд простоя раздули
+     * 187 окон до 535: 60 fps вместо 55 и ровность 17 мс вместо 33.
+     */
+    const d = runWith(['hit'], [])
+    d.sessions[0].log.push({ t: 5000, type: 'health', fps: 120, inferP50: 1, inferP95: 2, drops: 0, valid: 0, lost: 0 })
+    const r = report(d)
+    expect(r.health.windows).toBe(1)
+    expect(r.health.fps).toBe(39)
+  })
+
+  test('тревоги, уходы из видимости и ошибки ВИДНЫ в сводке', () => {
+    /*
+     * Всё это раньше уходило в `default` и не считалось нигде — тот же пробел,
+     * что признан у `run-game`: события `visibility` разбирались только
+     * глазами. Диагностика, которой нет в сводке, не существует для разбора.
+     */
+    const d = runWith(['hit'], [])
+    const log = d.sessions[0].log
+    log.push({ t: 600, type: 'alarm', text: 'Камера пропала' })
+    log.push({ t: 601, type: 'alarm', text: 'Камера пропала', _n: 2 })
+    log.push({ t: 602, type: 'visibility', state: 'hidden' })
+    log.push({ t: 603, type: 'visibility', state: 'visible' })
+    log.push({ t: 604, type: 'error', name: 'TypeError', message: 'ой' })
+    log.push({ t: 605, type: 'error.promise', reason: 'ой' })
+    const r = report(d)
+    expect(r.alarms['Камера пропала']).toBe(3)
+    expect(r.hidden).toBe(1)
+    expect(r.errors).toBe(2)
+  })
+
   test('неизвестные события не роняют сводку', () => {
     // Журнал переживает обновления игры: событие из будущей версии — не повод
     // отказаться разобрать всё остальное.
     const d = runWith(['hit'])
     d.sessions[0].log.push({ t: 999, type: 'что-то.новое', поле: 1 })
     expect(() => report(d)).not.toThrow()
+  })
+})
+
+/*
+ * Печать сводки проверяется ОТДЕЛЬНО от самой сводки, и это не формальность:
+ * соврать можно именно подписью. Прежде отчёт считал медиану девяноста пятых
+ * процентилей и печатал её как «p95» забега — числа были посчитаны, а строка
+ * говорила неправду, и ни один тест этого не видел, потому что тестов на вывод
+ * не было вовсе.
+ */
+describe('печать сводки', () => {
+  /** Дамп в файле: `printReport` читает путь, а не объект. */
+  function dumpFile(log: Array<Record<string, unknown>>): string {
+    const file = join(tmpdir(), `pose-game-report-${process.pid}-${Math.random().toString(36).slice(2)}.json`)
+    writeFileSync(file, JSON.stringify({ exportedAt: new Date().toISOString(), limits: {}, sessions: [{ id: 1, log }] }))
+    return file
+  }
+
+  /** Собирает всё, что ушло в stdout. */
+  function printed(file: string): string {
+    const chunks: string[] = []
+    const spy = vi.spyOn(process.stdout, 'write').mockImplementation((c: unknown) => {
+      chunks.push(String(c))
+      return true
+    })
+    try {
+      printReport(file)
+    } finally {
+      spy.mockRestore()
+      rmSync(file, { force: true })
+    }
+    return chunks.join('')
+  }
+
+  test('инференс подписан медианой окон и худшим окном, а не «p50 / p95»', () => {
+    const out = printed(
+      dumpFile([
+        { t: 0, type: 'run.start', tier: 1, durationS: 60, strict: 1, latencyMs: 250, source: 'camera' },
+        { t: 1, type: 'health', fps: 50, inferP50: 20, inferP95: 44, drops: 0, valid: 10, lost: 0 },
+        { t: 2, type: 'health', fps: 50, inferP50: 22, inferP95: 300, drops: 1, valid: 10, lost: 0 },
+        { t: 3, type: 'run.finish', score: 3, rounds: 1, hits: 1, misses: 0, skipped: 0, tier: 1, durationS: 60 },
+      ]),
+    )
+    expect(out).toContain('медиана окон')
+    expect(out).toContain('худшее окно по p95 300')
+    expect(out).toContain('окон 2')
+    // Прежней лживой подписи в выводе больше нет.
+    expect(out).not.toMatch(/инференс p50/)
+  })
+
+  test('тревоги и уходы из видимости названы в выводе', () => {
+    const out = printed(
+      dumpFile([
+        { t: 0, type: 'run.start', tier: 1, durationS: 60, strict: 1, latencyMs: 250, source: 'camera' },
+        { t: 1, type: 'alarm', text: 'Кадр камеры вертикальный — поверни телефон' },
+        { t: 2, type: 'visibility', state: 'hidden' },
+        { t: 3, type: 'error', name: 'TypeError', message: 'ой' },
+      ]),
+    )
+    expect(out).toContain('тревоги на экране')
+    expect(out).toContain('вертикальный')
+    expect(out).toMatch(/уходила из видимости: 1/)
+    expect(out).toMatch(/ошибок: 1/)
   })
 })

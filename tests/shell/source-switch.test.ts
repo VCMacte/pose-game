@@ -164,6 +164,32 @@ describe('замер задержки на служебном экране', () 
     expect(h.a.settings.get('latencyMs')).toBe(250)
   })
 
+  test('пока замер идёт, экран говорит ОБ ЭТОМ, а не «ещё не мерили»', async () => {
+    /*
+     * Поймано проверкой в браузере: нажатие кнопки не меняло на экране ничего,
+     * и «Ещё не мерили» означало сразу три разных состояния — не мерили,
+     * мерим прямо сейчас и замер повис. Взрослый у штатива различить их не
+     * может, а серия идёт секунд двадцать.
+     */
+    let finish: (() => void) | null = null
+    const h = harness({
+      measureLatency: () =>
+        new Promise((resolve) => {
+          finish = () => resolve({ medianMs: 200, spreadMs: 20 })
+        }),
+    })
+    h.a.go('service')
+    root.querySelector<HTMLElement>('[data-test="measure-latency"]')!.click()
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+
+    expect(root.textContent).toMatch(/мерю/i)
+
+    finish!()
+    for (let i = 0; i < 5; i++) await Promise.resolve()
+    expect(root.textContent).not.toMatch(/мерю/i)
+    expect(root.textContent).toContain('200')
+  })
+
   test('отказавший замер ГОВОРИТ об отказе, а не молчит', async () => {
     /*
      * Замер отказывает штатно: телевизор приглушён, микрофон не дал

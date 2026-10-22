@@ -201,6 +201,8 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
   let latency: { medianMs: number; spreadMs: number } | null = null
   /** Чем кончился отказавший замер. `null` — отказа не было. */
   let latencyFailed: string | null = null
+  /** Идёт ли замер задержки прямо сейчас: экран обязан это говорить. */
+  let latencyBusy = false
   let stopped = false
   let rafId: number | null = null
   let stage: RunStage | null = null
@@ -597,7 +599,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     root.replaceChildren(
       serviceScreen({
         settings,
-        info: { ...serviceInfo(), latency, latencyFailed },
+        info: { ...serviceInfo(), latency, latencyFailed, latencyBusy },
         debug,
         onDebug: (patch) => Object.assign(debug, patch),
         onBack: () => go('menu'),
@@ -607,10 +609,14 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
          * отличить её от сломанной нечем, консоли на штативе нет.
          */
         onMeasureLatency: () => {
+          if (latencyBusy) return
+          latencyBusy = true
+          draw()
           void (deps.measureLatency ?? (() => Promise.resolve(null)))().then(
             (r) => {
               latency = r
               latencyFailed = null
+              latencyBusy = false
               draw()
             },
             /*
@@ -621,6 +627,7 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
             (e: unknown) => {
               latency = null
               latencyFailed = e instanceof Error ? e.message : String(e)
+              latencyBusy = false
               draw()
             },
           )
@@ -660,16 +667,20 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
      * Просьба идёт на КАЖДОМ переходе, и это не расточительство: замок
      * требует жеста, а переход экрана и есть нажатие ребёнка.
      */
-    const want = ORIENTATION[next]
-    /*
-     * Исход замка НИКУДА не показывается, и это решение, а не упущение.
-     * Просьбу повернуть телефон показывает CSS по `@media (orientation:
-     * portrait)` — то есть по тому, что ЕСТЬ, а не по рапорту: замок умеет
-     * отрапортовать успех на всё ещё портретном экране и отказать на уже
-     * горизонтальном (урок `run-game`). Отказ не бросается: ждать его
-     * исхода некому.
-     */
-    void (deps.lockOrientation ?? defaultLock)(want).catch(() => {})
+    keepOrientation()
+  }
+
+  /*
+   * Попросить закрепить ориентацию текущего экрана.
+   *
+   * Исход замка НИКУДА не показывается, и это решение, а не упущение. Просьбу
+   * повернуть телефон показывает CSS по `@media (orientation: portrait)` — то
+   * есть по тому, что ЕСТЬ, а не по рапорту: замок умеет отрапортовать успех
+   * на всё ещё портретном экране и отказать на уже горизонтальном (урок
+   * `run-game`). Отказ не бросается: ждать его исхода некому.
+   */
+  function keepOrientation(): void {
+    void (deps.lockOrientation ?? defaultLock)(ORIENTATION[screen]).catch(() => {})
   }
 
   /*
@@ -685,6 +696,15 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     if (stopped) return
     const state = typeof document === 'undefined' || document.visibilityState !== 'hidden' ? 'visible' : 'hidden'
     ;(deps.write ?? journalWrite)(visibilityEvent({ state }))
+
+    /*
+     * Вернулись — закрепить экран ЗАНОВО. Уход в `hidden` срывает полный
+     * экран, а за ним уходит и замок ориентации: в `run-game` 14.10 будильник
+     * дал цепочку «полный экран сорвался → кадр камеры повернулся в портрет →
+     * ложная пауза на 13.5 секунды». Полный экран они возвращают, ориентацию
+     * — нет, и это их незакрытая дыра.
+     */
+    if (state === 'visible') keepOrientation()
   }
   if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
 
@@ -703,6 +723,9 @@ export function startApp(root: HTMLElement, deps: AppDeps = {}): App {
     stop: () => {
       if (stopped) return
       stopped = true
+      // Слушатель видимости висит на `document` и приложение не переживает:
+      // не снятый, он пишет в журнал от имени погашенного приложения.
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
       stopFrames()
     },
   }

@@ -64,9 +64,16 @@ export function printReport(path: string | undefined): void {
     `исходы: hit ${r.verdicts.hit}, miss ${r.verdicts.miss}, skip ${r.verdicts.skip}\n`,
   )
   process.stdout.write(`счёт: лучший ${r.score.best}, последний ${r.score.last}\n`)
+  /*
+   * Подписи здесь — часть правды о числах, а не украшение. Квантили посчитаны
+   * ВНУТРИ окна, и «p50 по забегу» из них не получается: отчёт говорит
+   * «медиана окон» и «худшее окно по p95» ровно потому, что иначе соврал бы
+   * числом. Урок перенесён из `run-game` дословно.
+   */
+  process.stdout.write(`частота: ${r.health.fps} fps, отброшено кадров ${r.health.drops}\n`)
   process.stdout.write(
-    `частота: ${r.health.fps} fps, инференс p50 ${r.health.inferP50} / p95 ${r.health.inferP95} мс,` +
-      ` отброшено ${r.health.drops}\n`,
+    `инференс: медиана окон ${r.health.inferMedian} мс,` +
+      ` худшее окно по p95 ${r.health.inferWorst} мс   (окон ${r.health.windows})\n`,
   )
 
   const pauses = Object.entries(r.pauses).sort((a, b) => b[1] - a[1])
@@ -76,6 +83,22 @@ export function printReport(path: string | undefined): void {
   const axes = Object.entries(r.axisMisses).sort((a, b) => b[1] - a[1])
   process.stdout.write(`\nпромахи по осям:${axes.length ? '' : ' нет'}\n`)
   for (const [axis, n] of axes) process.stdout.write(`  ${axis.padEnd(14)} ${n}\n`)
+
+  /*
+   * Диагностика, которой нет в сводке, не существует для разбора: телефон на
+   * штативе, консоли нет, и полмегабайта JSON глазами никто не читает. У
+   * `run-game` события `visibility` разбирались только вручную — признанный
+   * ими пробел, и здесь он закрыт.
+   */
+  const alarms = Object.entries(r.alarms).sort((a, b) => b[1] - a[1])
+  if (alarms.length > 0) {
+    process.stdout.write('\nтревоги на экране:\n')
+    for (const [text, n] of alarms) process.stdout.write(`  ${n}× ${text}\n`)
+  }
+
+  if (r.hidden > 0 || r.errors > 0) {
+    process.stdout.write(`\nстраница уходила из видимости: ${r.hidden}   ошибок: ${r.errors}\n`)
+  }
 
   if (r.hardestPose) {
     process.stdout.write(
