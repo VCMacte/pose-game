@@ -1,0 +1,395 @@
+<!doctype html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8" />
+    <!--
+      `user-scalable=no` и фиксированный масштаб: игра на штативе, и случайный
+      зум двумя пальцами по экрану забега уводит картинку, которую не вернуть
+      не трогая телефон.
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no"
+    />
+    <meta name="theme-color" content="#0b1020" />
+    <link rel="manifest" href="/pose-game/manifest.webmanifest" />
+    <link rel="icon" href="/pose-game/icon.svg" type="image/svg+xml" />
+    <title>Стена с позами</title>
+    <style>
+      /*
+        Вёрстка экранов — CSS, покадровый путь — Canvas. Пересечения нет:
+        подсказки и кнопки меняются раз в секунды, кадр стены — 40 раз в
+        секунду, и платить за кадр перерисовкой DOM нечем.
+      */
+      :root {
+        /*
+          Ширина колонки меню. Игру ВСЕГДА запускают с телефона, и экраны
+          меню рассчитаны на него: на широком экране (десктоп при проверке,
+          зеркало на телевизоре) растянутое во всю ширину меню — это ряды
+          кнопок по метру длиной и строки, которые читаются зигзагом.
+
+          Значение подобрано под целевой телефон: Redmi Note 11 Pro даёт
+          ≈393 CSS-пикселя ширины, то есть на САМОМ телефоне ограничение не
+          срабатывает вовсе и там ничего не меняется. Оно бьёт только там, где
+          экран шире телефона.
+        */
+        --col: 28rem;
+        --bg: #0b1020;
+        --fg: #ffffff;
+        --dim: #8d96b5;
+        --accent: #3ddc84;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      /*
+        `hidden` обязан ПОБЕЖДАТЬ, и это не перестраховка.
+        Стиль браузера задаёт `[hidden] { display: none }` с наименьшим весом,
+        и любое авторское правило с `display` его перебивает. На этом уже
+        попалось меню паузы: `.pause-menu { display: flex }` держало его
+        открытым поверх игры НАВСЕГДА, при том что свойство `hidden` у
+        элемента стояло верно — и тест, проверявший `hidden`, проходил.
+        Поймано только запуском собранной страницы в браузере.
+      */
+      [hidden] {
+        display: none !important;
+      }
+
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+      }
+
+      /*
+        Шрифт задаётся НА BODY, а не на `html`. На `html` он задавал бы
+        корневой размер, от которого считается `rem`: при `4vmin` и экране
+        1080 это 43 пикселя, и `28rem` колонки меню превращались в 1210 —
+        ограничение по ширине не срабатывало вовсе. Поймано скриншотом на
+        широком экране.
+      */
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font: 700 4vmin/1.3 system-ui, sans-serif;
+        /* Выделение текста пальцем на штативе — только помеха. */
+        -webkit-user-select: none;
+        user-select: none;
+        overscroll-behavior: none;
+      }
+
+      #app,
+      .screen {
+        height: 100%;
+      }
+
+      .screen {
+        display: flex;
+        flex-direction: column;
+        gap: 2vmin;
+        padding: 3vmin;
+        overflow-y: auto;
+      }
+
+      /*
+        Экраны МЕНЮ — колонка шириной телефона, по центру. Экран забега сюда
+        не входит и остаётся во всю ширину: там холст, и он уезжает на
+        телевизор целиком.
+
+        Размеры внутри колонки считаются от ЕЁ ширины (`--w`), а не от `vmin`.
+        Иначе на десктопе колонка узкая, а шрифт и кнопки считаются от высоты
+        окна: 4vmin при 1080 — это 43 пикселя, то есть подпись выше кнопки.
+        На телефоне `--w` равна ширине экрана, то есть меньшей стороне, и
+        совпадает с прежним `vmin` — на целевом устройстве не меняется ничего.
+
+        Container-queries здесь НЕ годятся: `cqw` у самого контейнера
+        считается не от него, а от ближайшего предка-контейнера или от окна.
+        Это уже было написано и давало на десктопе шрифт в 77 пикселей.
+      */
+      .screen:not(.run) {
+        --w: min(100vw, var(--col));
+        max-width: var(--col);
+        margin-inline: auto;
+        width: 100%;
+        font-size: calc(var(--w) * 0.04);
+        gap: calc(var(--w) * 0.02);
+        padding: calc(var(--w) * 0.03);
+      }
+
+      .screen:not(.run) button {
+        border-width: calc(var(--w) * 0.004);
+        border-radius: calc(var(--w) * 0.012);
+        padding: calc(var(--w) * 0.02) calc(var(--w) * 0.03);
+        min-height: calc(var(--w) * 0.12);
+        min-width: calc(var(--w) * 0.12);
+      }
+
+      .screen:not(.run) .adult {
+        min-width: calc(var(--w) * 0.14);
+      }
+
+      .screen:not(.run) .play {
+        font-size: calc(var(--w) * 0.12);
+      }
+
+      .screen:not(.run) .choice {
+        gap: calc(var(--w) * 0.02);
+      }
+
+      .screen:not(.run) h1 {
+        font-size: calc(var(--w) * 0.06);
+      }
+
+      .screen:not(.run) h2 {
+        font-size: calc(var(--w) * 0.045);
+      }
+
+      .screen:not(.run) h3 {
+        font-size: calc(var(--w) * 0.035);
+        margin: calc(var(--w) * 0.02) 0 0;
+      }
+
+      .screen:not(.run) .group {
+        gap: calc(var(--w) * 0.01);
+        border-top-width: calc(var(--w) * 0.003);
+        padding-top: calc(var(--w) * 0.02);
+      }
+
+      /*
+        Строка информации: мелко, тускло и внизу. Ребёнку она не нужна,
+        взрослому нужна ровно тогда, когда что-то пошло не так.
+      */
+      .info {
+        margin-top: auto;
+        display: flex;
+        flex-wrap: wrap;
+        gap: calc(var(--w) * 0.015);
+        align-items: baseline;
+        color: var(--dim);
+        font-weight: 400;
+        font-size: calc(var(--w) * 0.028);
+      }
+
+      /* Пометка о состоянии, меняющем поведение, — заметнее версии. */
+      .info .mark {
+        color: #ffd166;
+        font-weight: 700;
+      }
+
+      .info .ver {
+        margin-left: auto;
+      }
+
+      .screen:not(.run) small {
+        font-size: calc(var(--w) * 0.03);
+      }
+
+      .top {
+        display: flex;
+        justify-content: flex-end;
+      }
+
+      /*
+        Базовые размеры кнопки — в `vmin`: их наследует ЭКРАН ЗАБЕГА, который
+        колонкой не ограничен. Меню перебивает их размерами от ширины колонки
+        (см. блок `.screen:not(.run)` выше).
+      */
+      button {
+        font: inherit;
+        color: var(--fg);
+        background: #1b2340;
+        border: 0.4vmin solid #2a3a63;
+        border-radius: 1.2vmin;
+        padding: 2vmin 3vmin;
+        /* Палец ребёнка: цель не меньше 12 мм по короткой стороне. */
+        min-height: 12vmin;
+        min-width: 12vmin;
+      }
+
+      button[disabled] {
+        opacity: 0.4;
+      }
+
+      button.on {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+
+      /* Вход на экраны взрослого: обычная кнопка, без ритуалов. */
+      .adult {
+        min-width: 14vmin;
+      }
+
+      .play {
+        flex: 1 1 auto;
+        font-size: 12vmin;
+        color: var(--bg);
+        background: var(--accent);
+        border-color: var(--accent);
+      }
+
+      .best {
+        color: var(--dim);
+        text-align: center;
+      }
+
+      .choice {
+        display: flex;
+        gap: 2vmin;
+        flex-wrap: wrap;
+      }
+
+      h1 {
+        font-size: 6vmin;
+        margin: 0;
+      }
+
+      h2 {
+        font-size: 4.5vmin;
+        margin: 0;
+      }
+
+      h3 {
+        font-size: 3.5vmin;
+        margin: 2vmin 0 0;
+        color: var(--dim);
+      }
+
+      .group {
+        display: flex;
+        flex-direction: column;
+        gap: 1vmin;
+        border-top: 0.3vmin solid #2a3a63;
+        padding-top: 2vmin;
+      }
+
+      /* Экран забега: холст во весь экран, подсказка поверх него. */
+      .screen.run {
+        padding: 0;
+        position: relative;
+        overflow: hidden;
+      }
+
+      .screen.run canvas {
+        width: 100%;
+        height: 100%;
+        display: block;
+        /* Буфер фиксированно 1280×720; растягивает его браузер. */
+        object-fit: contain;
+      }
+
+      .hint {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 6vmin;
+        text-align: center;
+        font-size: 5vmin;
+        text-shadow: 0 0 2vmin #000;
+      }
+
+      /*
+        Аварийная строка: что СЛОМАЛОСЬ. Стоит сверху, а не рядом с подсказкой,
+        и выделена цветом — её читает взрослый, подойдя к телефону, а не
+        ребёнок издали. Телефон на штативе, консоли нет: эта строка и есть вся
+        диагностика, какая видна без выгрузки журнала.
+      */
+      .alarm {
+        position: absolute;
+        left: 0;
+        right: 0;
+        top: 2vmin;
+        text-align: center;
+        font-size: 4vmin;
+        color: #ffd166;
+        text-shadow: 0 0 2vmin #000;
+      }
+
+      /*
+        Просьба повернуть телефон — НА CSS, а не по ответу замка ориентации.
+
+        Урок `run-game`, оплаченный живыми прогонами: замок способен
+        отрапортовать успех на всё ещё портретном экране (и отказать на уже
+        горизонтальном), так что подсказка по его ответу врала бы в обе
+        стороны. `@media (orientation: portrait)` говорит о том, что есть, а
+        не о том, что просили. Поверх всего забега: горизонтальная вёрстка
+        внутри вертикального экрана читается как поломка игры.
+      */
+      .rotate {
+        display: none;
+      }
+
+      @media (orientation: portrait) {
+        .screen-run .rotate {
+          display: flex;
+          position: absolute;
+          inset: 0;
+          z-index: 10;
+          align-items: center;
+          justify-content: center;
+          padding: 6vmin;
+          text-align: center;
+          font-size: 7vmin;
+          background: #0b1020;
+          color: #ffd166;
+        }
+      }
+
+      /*
+        Кнопка паузы — в правом нижнем углу: палец ребёнка держит телефон
+        снизу, а верх экрана занят HUD через зеркалирование.
+      */
+      .pause-btn {
+        position: absolute;
+        right: 3vmin;
+        bottom: 3vmin;
+        font-size: 7vmin;
+        min-width: 16vmin;
+        min-height: 16vmin;
+        opacity: 0.75;
+      }
+
+      /* Меню паузы накрывает экран целиком: выбор здесь — единственное дело. */
+      .pause-menu {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 3vmin;
+        padding: 6vmin;
+        background: rgba(11, 16, 32, 0.92);
+        text-align: center;
+      }
+
+      .pause-menu h1 {
+        font-size: 9vmin;
+      }
+
+      .pause-menu p {
+        color: var(--dim);
+        margin: 0;
+      }
+
+      .pause-menu .play {
+        flex: 0 0 auto;
+        font-size: 7vmin;
+        padding: 3vmin 6vmin;
+      }
+
+      small {
+        color: var(--dim);
+        font-weight: 400;
+        font-size: 3vmin;
+      }
+    </style>
+    <script type="module" crossorigin src="/pose-game/assets/index-B7a36gG8.js"></script>
+    <link rel="modulepreload" crossorigin href="/pose-game/assets/sw-BX0kYJib.js">
+  </head>
+  <body>
+    <div id="app"></div>
+  </body>
+</html>
